@@ -1,0 +1,3 @@
+display_name: Claude Code Orchestrator
+short_description: Route Claude Code workers through CCSwitch profiles under Codex control.
+default_prompt: Use Claude Code as an external sub-agent through cc-orchestrator, choose an appropriate CCSwitch model profile, keep Codex as controller, and verify logs/diffs before reporting completion.

@@ -1,0 +1,72 @@
+{
+  "default_profile": "auto",
+  "profile_aliases": {
+    "strong_text": "auto:architecture",
+    "code_strong": "auto:implementation",
+    "review_strong": "auto:review",
+    "multimodal": "auto:multimodal",
+    "general": "auto:requirements",
+    "fast": "auto:testing",
+    "ops": "auto:ops"
+  },
+  "task_routes": {
+    "simple": {
+      "profile_alias": "fast",
+      "permission_mode": "plan",
+      "timeout_seconds": 180,
+      "reason": "Fast low-risk planning or summarization."
+    },
+    "normal": {
+      "profile_alias": "general",
+      "permission_mode": "plan",
+      "timeout_seconds": 420,
+      "reason": "Balanced local model for routine project analysis."
+    },
+    "complex_code": {
+      "profile_alias": "code_strong",
+      "permission_mode": "plan",
+      "timeout_seconds": 900,
+      "reason": "Highest local score for code implementation."
+    },
+    "security_review": {
+      "profile_alias": "review_strong",
+      "permission_mode": "plan",
+      "timeout_seconds": 600,
+      "reason": "Highest local score for reasoning-heavy review."
+    },
+    "architecture": {
+      "profile_alias": "strong_text",
+      "permission_mode": "plan",
+      "timeout_seconds": 600,
+      "reason": "Highest local score for architecture reasoning."
+    },
+    "multimodal": {
+      "profile_alias": "multimodal",
+      "permission_mode": "plan",
+      "timeout_seconds": 600,
+      "reason": "Highest local score for multimodal tasks."
+    },
+    "ops": {
+      "profile_alias": "ops",
+      "permission_mode": "plan",
+      "timeout_seconds": 420,
+      "reason": "Stable local model for operational checks."
+    }
+  },
+  "role_defaults": {
+    "requirements": "normal",
+    "architecture": "architecture",
+    "security": "security_review",
+    "testing": "simple",
+    "implementation": "complex_code",
+    "review": "security_review",
+    "ops": "ops",
+    "multimodal": "multimodal"
+  },
+  "safety": {
+    "default_write_enabled": false,
+    "visible_window_default": false,
+    "max_timeout_seconds": 1800,
+    "redact_secret_values": true
+  }
+}

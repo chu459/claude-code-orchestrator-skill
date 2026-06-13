@@ -1,0 +1,13 @@
+{
+  "claude-code-orchestrator": {
+    "command": "python",
+    "args": [
+      "-c",
+      "import os,sys,runpy; root=os.environ.get('CC_ORCHESTRATOR_HOME') or os.path.join(os.environ.get('CLAUDE_PLUGIN_ROOT', ''), 'scripts', 'cc-orchestrator'); sys.path.insert(0, root); runpy.run_path(os.path.join(root, 'server.py'), run_name='__main__')"
+    ],
+    "env": {
+      "PYTHONUTF8": "1",
+      "PYTHONIOENCODING": "utf-8"
+    }
+  }
+}
