@@ -12,6 +12,7 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, ConfigDict, Field
 
 from cc_orchestrator import (
+    ROLE_ORDER,
     OrchestratorError,
     healthcheck,
     git_diff,
@@ -29,6 +30,12 @@ from cc_orchestrator import (
 
 
 mcp = FastMCP("claude_code_mcp")
+ROLE_DESCRIPTION = "Agent role. Supported: " + ", ".join(ROLE_ORDER) + ". Codex remains the controller."
+TASK_TYPE_DESCRIPTION = (
+    "Optional task route key. Supported: simple, normal, complex_code, development, "
+    "review, security_review, performance_review, compatibility_review, documentation, "
+    "automation, architecture, multimodal, ops."
+)
 
 
 class ResponseFormat(str, Enum):
@@ -46,8 +53,8 @@ class ListProfilesInput(BaseModel):
 class PickProfileInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
-    role: str = Field(default="implementation", description="Agent role, e.g. requirements, architecture, security, testing, implementation, ops.")
-    task_type: Optional[str] = Field(default=None, description="Task class, e.g. simple, normal, complex_code, security_review, architecture, multimodal.")
+    role: str = Field(default="implementation", description=ROLE_DESCRIPTION)
+    task_type: Optional[str] = Field(default=None, description=TASK_TYPE_DESCRIPTION)
     profile: Optional[str] = Field(default=None, description="Optional explicit CCSwitch profile name or id.")
     response_format: ResponseFormat = Field(default=ResponseFormat.JSON, description="Return JSON or markdown.")
 
@@ -56,8 +63,8 @@ class RunAgentInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
     task: str = Field(..., min_length=1, max_length=20000, description="Task to give Claude Code.")
-    role: str = Field(default="implementation", description="Agent role from config/agents.json.")
-    task_type: Optional[str] = Field(default=None, description="Optional task route key from config/model_policy.json.")
+    role: str = Field(default="implementation", description=ROLE_DESCRIPTION)
+    task_type: Optional[str] = Field(default=None, description=TASK_TYPE_DESCRIPTION)
     profile: Optional[str] = Field(default=None, description="Optional explicit CCSwitch profile name or id.")
     allow_write: bool = Field(default=False, description="Allow Claude Code to use acceptEdits. Defaults to read-only/plan behavior.")
     timeout_seconds: Optional[int] = Field(default=None, ge=10, le=1800, description="Optional timeout override.")
@@ -83,7 +90,7 @@ class DiffInput(BaseModel):
 class WorkflowPlanInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
-    task: str = Field(..., min_length=1, max_length=20000, description="User task to plan for the configured multi-agent workflow.")
+    task: str = Field(..., min_length=1, max_length=20000, description="User task to plan for the configured Codex-controlled multi-agent workflow.")
     cwd: Optional[str] = Field(default=None, description="Working directory for the workflow.")
 
 
@@ -98,7 +105,7 @@ class ClaudeMdInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
     cwd: Optional[str] = Field(default=None, description="Project directory where CLAUDE.md should be written. Defaults to MCP server cwd.")
-    role: str = Field(default="implementation", description="Agent role to embed into CLAUDE.md.")
+    role: str = Field(default="implementation", description=ROLE_DESCRIPTION)
     project_name: Optional[str] = Field(default=None, description="Optional human-readable project name.")
     append: bool = Field(default=False, description="Append a managed section if CLAUDE.md already exists.")
     force: bool = Field(default=False, description="Replace CLAUDE.md after writing a timestamped backup.")
@@ -361,7 +368,12 @@ async def cc_git_diff(params: DiffInput) -> str:
     },
 )
 async def cc_workflow_plan(params: WorkflowPlanInput) -> str:
-    """Return the configured role/model/permission plan for the four-phase workflow."""
+    """Return the configured role/model/permission plan for the Codex-controlled workflow.
+
+    Worker roles include requirements, development, testing, review, performance,
+    compatibility, documentation, automation, security, ops, plus legacy architecture,
+    implementation, and multimodal roles.
+    """
     try:
         return _json(run_workflow_plan(params.task, cwd=Path(params.cwd) if params.cwd else None))
     except Exception as exc:
@@ -412,14 +424,16 @@ async def cc_write_claude_md(params: ClaudeMdInput) -> str:
 async def cc_score_models(params: ListProfilesInput) -> str:
     """Score all Claude models discovered from local CCSwitch provider profiles.
 
-    Scores are local heuristics, not paid benchmark results. Secrets are never returned.
+    Scores are local heuristics, not paid benchmark results. JSON output includes
+    role_scores for every configured worker role. Secrets are never returned.
     """
     try:
         data = score_models()
         if params.response_format == ResponseFormat.MARKDOWN:
-            lines = ["# Local CCSwitch Model Scores", ""]
+            lines = ["# Local CCSwitch Model Scores", "", f"Roles: {', '.join(ROLE_ORDER)}", ""]
             for item in data["models"]:
-                lines.append(f"- `{item['model']}` via `{item['profile_name']}`: overall `{item['overall']}/10`")
+                role_scores = json.dumps(item.get("role_scores", {}), ensure_ascii=False)
+                lines.append(f"- `{item['model']}` via `{item['profile_name']}`: overall `{item['overall']}/10`; role scores `{role_scores}`")
             return "\n".join(lines)
         return _json(data)
     except Exception as exc:

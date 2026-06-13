@@ -11,6 +11,8 @@ Use this skill when Codex should control Claude Code through the bundled orchest
 
 Codex remains the controller. Claude Code is an external worker launched through the orchestrator. Do not treat Claude Code output as final until Codex has reviewed logs, diffs, and verification results.
 
+Codex owns planning, write-scope decisions, final review, and final response. Claude Code agents only provide role-specific analysis or scoped edits when Codex explicitly enables write access.
+
 Default routing:
 
 - Discover CCSwitch from `$env:CCSWITCH_HOME`, `$env:USERPROFILE\.cc-switch`, or the current user home.
@@ -18,6 +20,23 @@ Default routing:
 - Score every Claude model found in CCSwitch, then choose the best local model for each agent role.
 
 The orchestrator reads CCSwitch profiles in read-only mode and injects provider env vars only into the launched Claude Code process. It should not rewrite CCSwitch global state.
+
+## Worker Roles
+
+Supported primary roles:
+
+- `requirements`: clarify needs, gaps, plans, constraints, and acceptance criteria.
+- `development`: implement scoped code changes when write access is granted.
+- `testing`: design or run focused checks, edge cases, and failure-mode tests.
+- `review`: review code quality, bugs, maintainability, and release blockers.
+- `performance`: inspect slow paths, resource use, blocking IO, and measurable optimizations.
+- `compatibility`: check OS, shell, dependency, version, and install portability.
+- `documentation`: improve examples, onboarding, FAQ, and troubleshooting.
+- `automation`: design CI/CD, tests, packaging, release, and repeatable scripts.
+- `security`: audit secrets, permissions, injection, privacy, and destructive paths.
+- `ops`: check deployment, logs, observability, release safety, and rollback.
+
+Legacy/support roles still work: `architecture`, `implementation`, and `multimodal`.
 
 ## Preferred Commands
 
@@ -68,7 +87,7 @@ python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" write-reports
 Create or update a project `CLAUDE.md` for Claude Code sub-agents:
 
 ```powershell
-python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" write-claude-md --cwd "PROJECT_PATH" --role implementation
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" write-claude-md --cwd "PROJECT_PATH" --role development
 ```
 
 If a project already has `CLAUDE.md`, preserve it by default. Use `--append` to add the managed orchestrator section, or `--force` to replace after writing a timestamped backup.
@@ -76,13 +95,13 @@ If a project already has `CLAUDE.md`, preserve it by default. Use `--append` to 
 Pick a route without running Claude Code:
 
 ```powershell
-python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" pick --role implementation --task-type complex_code
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" pick --role performance --task-type performance_review
 ```
 
 Run Claude Code non-interactively:
 
 ```powershell
-python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" run "TASK" --role architecture
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" run "TASK" --role development
 ```
 
 For long multi-agent work, split prompts into short role-specific tasks and set a clear timeout. If a run times out, inspect the saved run folder instead of rerunning blindly:
@@ -94,7 +113,7 @@ python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" last-run
 Open a visible Claude Code window:
 
 ```powershell
-python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" run-visible "TASK" --role architecture
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" run-visible "TASK" --role review
 ```
 
 Inspect last run:
@@ -124,10 +143,10 @@ python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" diff --cwd "PROJECT_PATH"
 
 For the user's multi-agent workflow:
 
-1. Run or plan requirements, architecture, security, and testing roles.
-2. Cross-review architecture with security/testing feedback.
-3. Use implementation only after the plan is stable; keep writes scoped.
-4. Summarize role conclusions, conflicts, final changes, verification, and deployment advice.
+1. Codex plans the write scope and asks role workers for focused input.
+2. Run or plan requirements, development, testing, review, performance, compatibility, documentation, automation, security, and ops roles as needed.
+3. Cross-review conflicts before enabling any scoped write role.
+4. Codex reviews logs, diffs, and verification, then gives the final answer.
 
 Use:
 
@@ -136,4 +155,15 @@ python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" workflow-plan "TASK"
 ```
 
 before launching a full workflow.
+
+## MCP Parameter Notes
+
+Use the same role names through MCP:
+
+- `cc_pick_profile`, `cc_run_agent`, `cc_run_visible_agent`, and `cc_write_claude_md` accept `role`.
+- `role` supports `requirements`, `development`, `testing`, `review`, `performance`, `compatibility`, `documentation`, `automation`, `security`, `ops`, plus `architecture`, `implementation`, and `multimodal`.
+- `task_type` supports `simple`, `normal`, `complex_code`, `development`, `review`, `security_review`, `performance_review`, `compatibility_review`, `documentation`, `automation`, `architecture`, `multimodal`, and `ops`.
+- `cc_workflow_plan` returns `controller: codex`, `worker_roles`, and one route per configured role.
+- `cc_score_models` returns `role_scores` for all configured roles.
+- `cc_write_claude_md` embeds the selected role prompt and states that Codex is the controller.
 

@@ -3,7 +3,13 @@
   "profile_aliases": {
     "strong_text": "auto:architecture",
     "code_strong": "auto:implementation",
+    "development_strong": "auto:development",
     "review_strong": "auto:review",
+    "security_strong": "auto:security",
+    "performance_strong": "auto:performance",
+    "compatibility_stable": "auto:compatibility",
+    "documentation_balanced": "auto:documentation",
+    "automation_strong": "auto:automation",
     "multimodal": "auto:multimodal",
     "general": "auto:requirements",
     "fast": "auto:testing",
@@ -28,11 +34,47 @@
       "timeout_seconds": 900,
       "reason": "Highest local score for code implementation."
     },
-    "security_review": {
+    "development": {
+      "profile_alias": "development_strong",
+      "permission_mode": "plan",
+      "timeout_seconds": 900,
+      "reason": "Highest local score for main code development."
+    },
+    "review": {
       "profile_alias": "review_strong",
       "permission_mode": "plan",
       "timeout_seconds": 600,
-      "reason": "Highest local score for reasoning-heavy review."
+      "reason": "Highest local score for code review."
+    },
+    "security_review": {
+      "profile_alias": "security_strong",
+      "permission_mode": "plan",
+      "timeout_seconds": 600,
+      "reason": "Highest local score for security review."
+    },
+    "performance_review": {
+      "profile_alias": "performance_strong",
+      "permission_mode": "plan",
+      "timeout_seconds": 600,
+      "reason": "Best local fit for runtime, IO, and resource optimization review."
+    },
+    "compatibility_review": {
+      "profile_alias": "compatibility_stable",
+      "permission_mode": "plan",
+      "timeout_seconds": 600,
+      "reason": "Best local fit for multi-environment compatibility checks."
+    },
+    "documentation": {
+      "profile_alias": "documentation_balanced",
+      "permission_mode": "plan",
+      "timeout_seconds": 420,
+      "reason": "Balanced local model for documentation and examples."
+    },
+    "automation": {
+      "profile_alias": "automation_strong",
+      "permission_mode": "plan",
+      "timeout_seconds": 600,
+      "reason": "Best local fit for CI/CD and repeatable automation work."
     },
     "architecture": {
       "profile_alias": "strong_text",
@@ -56,10 +98,15 @@
   "role_defaults": {
     "requirements": "normal",
     "architecture": "architecture",
+    "development": "development",
     "security": "security_review",
     "testing": "simple",
     "implementation": "complex_code",
-    "review": "security_review",
+    "review": "review",
+    "performance": "performance_review",
+    "compatibility": "compatibility_review",
+    "documentation": "documentation",
+    "automation": "automation",
     "ops": "ops",
     "multimodal": "multimodal"
   },

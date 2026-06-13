@@ -57,22 +57,78 @@ AGENTS_PATH = CONFIG_DIR / "agents.json"
 CLAUDE_MD_MARKER_BEGIN = "<!-- claude-code-orchestrator:begin -->"
 CLAUDE_MD_MARKER_END = "<!-- claude-code-orchestrator:end -->"
 SECRET_KEY_RE = re.compile(r"(key|token|secret|authorization|auth)", re.IGNORECASE)
-SECRET_VALUE_RE = re.compile(r"(sk-[A-Za-z0-9_\-]{8,}|[A-Za-z0-9]{20,}\.[A-Za-z0-9_\-]{8,})")
+SECRET_VALUE_RE = re.compile(
+    r"("
+    r"sk-[A-Za-z0-9_\-]{8,}|"
+    r"ghp_[A-Za-z0-9_]{20,}|"
+    r"github_pat_[A-Za-z0-9_]{20,}|"
+    r"npm_[A-Za-z0-9]{20,}|"
+    r"AKIA[0-9A-Z]{16}|"
+    r"AIza[0-9A-Za-z_\-]{35}|"
+    r"Bearer\s+[A-Za-z0-9._~+/=\-]{20,}|"
+    r"[A-Za-z0-9]{20,}\.[A-Za-z0-9_\-]{8,}|"
+    r"-----BEGIN (?:RSA|OPENSSH|PRIVATE) KEY-----"
+    r")",
+    re.IGNORECASE,
+)
+ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+RUN_ID_RE = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{8}$")
+PASSTHROUGH_ENV_KEYS = {
+    "PATH",
+    "Path",
+    "PATHEXT",
+    "SYSTEMROOT",
+    "SystemRoot",
+    "WINDIR",
+    "COMSPEC",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "HOME",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "PROGRAMDATA",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "SHELL",
+    "TERM",
+}
 MODEL_ENV_KEYS = (
     "ANTHROPIC_MODEL",
     "ANTHROPIC_DEFAULT_OPUS_MODEL",
     "ANTHROPIC_DEFAULT_SONNET_MODEL",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL",
 )
-ROLE_ORDER = ["requirements", "architecture", "security", "testing", "implementation", "review", "ops", "multimodal"]
+ROLE_ORDER = [
+    "requirements",
+    "architecture",
+    "development",
+    "testing",
+    "review",
+    "performance",
+    "compatibility",
+    "documentation",
+    "automation",
+    "security",
+    "implementation",
+    "ops",
+    "multimodal",
+]
 SCORE_KEYS = ("code", "long_context", "reasoning", "speed", "stability", "cost", "tool_use", "multimodal")
 ROLE_SCORE_WEIGHTS: dict[str, dict[str, float]] = {
     "requirements": {"reasoning": 0.20, "long_context": 0.20, "tool_use": 0.15, "stability": 0.15, "speed": 0.15, "code": 0.10, "cost": 0.05},
     "architecture": {"reasoning": 0.30, "code": 0.25, "long_context": 0.20, "tool_use": 0.15, "stability": 0.10},
+    "development": {"code": 0.35, "reasoning": 0.25, "tool_use": 0.20, "long_context": 0.10, "stability": 0.10},
     "security": {"reasoning": 0.35, "code": 0.20, "long_context": 0.20, "stability": 0.15, "tool_use": 0.10},
     "testing": {"code": 0.25, "tool_use": 0.25, "stability": 0.20, "speed": 0.15, "reasoning": 0.10, "cost": 0.05},
     "implementation": {"code": 0.35, "reasoning": 0.25, "tool_use": 0.20, "long_context": 0.10, "stability": 0.10},
     "review": {"reasoning": 0.30, "code": 0.25, "long_context": 0.20, "stability": 0.15, "tool_use": 0.10},
+    "performance": {"speed": 0.25, "code": 0.25, "stability": 0.20, "tool_use": 0.15, "reasoning": 0.15},
+    "compatibility": {"stability": 0.25, "tool_use": 0.20, "code": 0.20, "long_context": 0.15, "reasoning": 0.15, "cost": 0.05},
+    "documentation": {"long_context": 0.25, "reasoning": 0.20, "speed": 0.15, "tool_use": 0.15, "stability": 0.10, "code": 0.10, "cost": 0.05},
+    "automation": {"tool_use": 0.25, "code": 0.25, "stability": 0.20, "reasoning": 0.15, "speed": 0.10, "cost": 0.05},
     "ops": {"stability": 0.25, "tool_use": 0.20, "speed": 0.20, "reasoning": 0.15, "long_context": 0.10, "cost": 0.10},
     "multimodal": {"multimodal": 0.40, "tool_use": 0.20, "reasoning": 0.15, "code": 0.10, "long_context": 0.10, "stability": 0.05},
 }
@@ -235,10 +291,36 @@ def redact(value: Any) -> Any:
     if isinstance(value, list):
         return [redact(v) for v in value]
     if isinstance(value, str):
-        if value.startswith(("http://", "https://")):
-            return value
         return SECRET_VALUE_RE.sub(lambda match: match.group(0)[:6] + "..." + match.group(0)[-4:], value)
     return value
+
+
+def validate_env_key(key: str) -> str:
+    if not ENV_KEY_RE.match(key):
+        raise OrchestratorError(f"Unsafe environment variable name from CCSwitch profile: {key!r}")
+    return key
+
+
+def build_worker_env(provider_env: dict[str, str], model_override: str | None = None) -> dict[str, str]:
+    env = {key: value for key, value in os.environ.items() if key in PASSTHROUGH_ENV_KEYS}
+    for key, value in provider_env.items():
+        env[validate_env_key(str(key))] = str(value)
+    if model_override:
+        env["ANTHROPIC_MODEL"] = str(model_override)
+    env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+    return force_utf8_env(env)
+
+
+def safe_run_dir(run_id: str) -> Path:
+    if not RUN_ID_RE.match(run_id):
+        raise OrchestratorError(f"Invalid run id: {run_id}")
+    run_dir = (RUNS_DIR / run_id).resolve()
+    root = RUNS_DIR.resolve()
+    try:
+        run_dir.relative_to(root)
+    except ValueError as exc:
+        raise OrchestratorError(f"Run id resolves outside run directory: {run_id}") from exc
+    return run_dir
 
 
 def list_profiles(ccswitch_home: str | Path | None = None, include_secrets: bool = False) -> list[dict[str, Any]]:
@@ -403,10 +485,24 @@ def select_model_for_role(role: str = "implementation", task_type: str | None = 
     elif role not in ROLE_SCORE_WEIGHTS:
         if task_type == "simple":
             target = "testing"
+        elif task_type == "development":
+            target = "development"
+        elif task_type == "review":
+            target = "review"
         elif task_type == "security_review":
             target = "security"
         elif task_type == "architecture":
             target = "architecture"
+        elif task_type == "performance_review":
+            target = "performance"
+        elif task_type == "compatibility_review":
+            target = "compatibility"
+        elif task_type == "documentation":
+            target = "documentation"
+        elif task_type == "automation":
+            target = "automation"
+        elif task_type == "ops":
+            target = "ops"
     scored = score_models(ccswitch_home=ccswitch_home)["models"]
     if not scored:
         provider = get_provider(ccswitch_home=ccswitch_home)
@@ -443,8 +539,12 @@ def resolve_route(role: str = "implementation", task_type: str | None = None, pr
     alias = route.get("profile_alias")
     resolved_profile = profile or aliases.get(alias, alias) or policy.get("default_profile")
     selected_model: dict[str, Any] | None = None
+    selection_role = role
     if isinstance(resolved_profile, str) and resolved_profile.startswith("auto"):
-        selected_model = select_model_for_role(role=role, task_type=effective_task_type)
+        _, _, explicit_role = resolved_profile.partition(":")
+        if explicit_role:
+            selection_role = explicit_role
+        selected_model = select_model_for_role(role=selection_role, task_type=effective_task_type)
         resolved_profile = selected_model["profile"]
     if not resolved_profile:
         raise OrchestratorError("No profile could be resolved from policy.")
@@ -453,7 +553,7 @@ def resolve_route(role: str = "implementation", task_type: str | None = None, pr
         model_override = selected_model["model"]
     provider = get_provider(str(resolved_profile))
     if model_override and model_override not in provider.models:
-        fallback = select_model_for_role(role=role, task_type=effective_task_type)
+        fallback = select_model_for_role(role=selection_role, task_type=effective_task_type)
         resolved_profile = fallback["profile"]
         model_override = fallback["model"]
         selected_model = fallback
@@ -469,6 +569,7 @@ def resolve_route(role: str = "implementation", task_type: str | None = None, pr
         "reason": selected_model.get("reason") if selected_model else route.get("reason", ""),
         "route": route,
         "auto_selection": selected_model,
+        "selection_role": selection_role,
     }
 
 
@@ -494,7 +595,15 @@ def healthcheck() -> dict[str, Any]:
         result["ok"] = False
         result["profiles_error"] = str(exc)
     try:
-        proc = subprocess.run([claude_bin_path(), "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15)
+        proc = subprocess.run(
+            [claude_bin_path(), "--version"],
+            env=build_worker_env({}),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+        )
         result["claude_version_exit_code"] = proc.returncode
         result["claude_version"] = (proc.stdout or proc.stderr).strip()
         if proc.returncode != 0:
@@ -509,6 +618,8 @@ def build_prompt(role: str, task: str, context: str | None = None) -> str:
     agents = load_json(AGENTS_PATH)
     agent = agents.get(role) or agents.get("implementation") or {}
     pieces = [
+        "Codex is the controller, reviewer, and final decision maker. You are a Claude Code worker.",
+        "",
         agent.get("prompt", f"You are the {role} Agent."),
         "",
         "Follow these operating rules:",
@@ -550,14 +661,10 @@ def run_agent(
     run_dir = RUNS_DIR / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
     prompt = build_prompt(role, task, context)
+    safe_prompt = str(redact(prompt))
     prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
     effective_cwd = cwd or Path.cwd()
-    env = os.environ.copy()
-    env.update(provider.env)
-    env = force_utf8_env(env)
-    if route.get("model_override"):
-        env["ANTHROPIC_MODEL"] = str(route["model_override"])
-    env.setdefault("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+    env = build_worker_env(provider.env, route.get("model_override"))
     cmd = [
         claude_bin_path(),
         "-p",
@@ -566,7 +673,7 @@ def run_agent(
         "--permission-mode",
         permission_mode,
         "--no-session-persistence",
-        prompt,
+        safe_prompt,
     ]
     started = time.time()
     metadata: dict[str, Any] = {
@@ -591,7 +698,7 @@ def run_agent(
         "command": redact(cmd),
     }
     (run_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
-    (run_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
+    (run_dir / "prompt.txt").write_text(safe_prompt, encoding="utf-8")
     try:
         proc = subprocess.run(
             cmd,
@@ -653,36 +760,31 @@ def run_visible_agent(
     provider = get_provider(route["profile"])
     permission_mode = route["permission_mode"] if not allow_write else "acceptEdits"
     prompt = build_prompt(role, task, context)
+    safe_prompt = str(redact(prompt))
     effective_cwd = cwd or Path.cwd()
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
     run_dir = RUNS_DIR / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
     prompt_path = run_dir / "prompt.txt"
     bootstrap_path = run_dir / "start-visible.ps1"
-    prompt_path.write_text(prompt, encoding="utf-8")
-    env_lines = []
+    prompt_path.write_text(safe_prompt, encoding="utf-8")
+    env = build_worker_env(provider.env, route.get("model_override"))
     env_for_log: dict[str, str] = {}
     for key, value in provider.env.items():
-        env_lines.append(f"$env:{key} = {json.dumps(value)}")
         env_for_log[key] = value
     if route.get("model_override"):
-        env_lines.append(f"$env:ANTHROPIC_MODEL = {json.dumps(str(route['model_override']))}")
         env_for_log["ANTHROPIC_MODEL"] = str(route["model_override"])
-    env_lines.append('$env:CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1"')
-    env_lines.extend(
-        [
-            '$env:PYTHONIOENCODING = "utf-8"',
-            '$env:PYTHONUTF8 = "1"',
-            "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new()",
-            "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()",
-            "$OutputEncoding = [System.Text.UTF8Encoding]::new()",
-        ]
-    )
+    env_for_log["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+    console_lines = [
+        "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new()",
+        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()",
+        "$OutputEncoding = [System.Text.UTF8Encoding]::new()",
+    ]
     script = "\n".join(
         [
             "$ErrorActionPreference = 'Stop'",
             f"Set-Location -LiteralPath {json.dumps(str(effective_cwd))}",
-            *env_lines,
+            *console_lines,
             f"$prompt = Get-Content -Raw -LiteralPath {json.dumps(str(prompt_path))}",
             f"& {json.dumps(claude_bin_path())} --permission-mode {permission_mode} $prompt",
             "Write-Host ''",
@@ -723,6 +825,7 @@ def run_visible_agent(
             str(bootstrap_path),
         ],
         cwd=str(effective_cwd),
+        env=env,
         creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
     )
     (RUNS_DIR / "latest.txt").write_text(run_id, encoding="utf-8")
@@ -767,12 +870,15 @@ def run_workflow_plan(task: str, cwd: Path | None = None) -> dict[str, Any]:
                 "permission_mode": route["permission_mode"],
                 "timeout_seconds": route["timeout_seconds"],
                 "selection_score": (route.get("auto_selection") or {}).get("score"),
+                "selection_role": route.get("selection_role", role),
                 "reason": route.get("reason", ""),
             }
         )
     return {
         "task": task,
         "cwd": str(cwd or Path.cwd()),
+        "controller": "codex",
+        "worker_roles": ROLE_ORDER,
         "phases": [
             "parallel_analysis",
             "cross_review",
@@ -789,7 +895,13 @@ def default_auto_policy() -> dict[str, Any]:
         "profile_aliases": {
             "strong_text": "auto:architecture",
             "code_strong": "auto:implementation",
+            "development_strong": "auto:development",
             "review_strong": "auto:review",
+            "security_strong": "auto:security",
+            "performance_strong": "auto:performance",
+            "compatibility_stable": "auto:compatibility",
+            "documentation_balanced": "auto:documentation",
+            "automation_strong": "auto:automation",
             "multimodal": "auto:multimodal",
             "general": "auto:requirements",
             "fast": "auto:testing",
@@ -799,7 +911,13 @@ def default_auto_policy() -> dict[str, Any]:
             "simple": {"profile_alias": "fast", "permission_mode": "plan", "timeout_seconds": 180, "reason": "Fast low-risk planning or summarization."},
             "normal": {"profile_alias": "general", "permission_mode": "plan", "timeout_seconds": 420, "reason": "Balanced local model for routine project analysis."},
             "complex_code": {"profile_alias": "code_strong", "permission_mode": "plan", "timeout_seconds": 900, "reason": "Highest local score for code implementation."},
-            "security_review": {"profile_alias": "review_strong", "permission_mode": "plan", "timeout_seconds": 600, "reason": "Highest local score for reasoning-heavy review."},
+            "development": {"profile_alias": "development_strong", "permission_mode": "plan", "timeout_seconds": 900, "reason": "Highest local score for main code development."},
+            "review": {"profile_alias": "review_strong", "permission_mode": "plan", "timeout_seconds": 600, "reason": "Highest local score for code review."},
+            "security_review": {"profile_alias": "security_strong", "permission_mode": "plan", "timeout_seconds": 600, "reason": "Highest local score for security review."},
+            "performance_review": {"profile_alias": "performance_strong", "permission_mode": "plan", "timeout_seconds": 600, "reason": "Best local fit for runtime, IO, and resource optimization review."},
+            "compatibility_review": {"profile_alias": "compatibility_stable", "permission_mode": "plan", "timeout_seconds": 600, "reason": "Best local fit for multi-environment compatibility checks."},
+            "documentation": {"profile_alias": "documentation_balanced", "permission_mode": "plan", "timeout_seconds": 420, "reason": "Balanced local model for documentation and examples."},
+            "automation": {"profile_alias": "automation_strong", "permission_mode": "plan", "timeout_seconds": 600, "reason": "Best local fit for CI/CD and repeatable automation work."},
             "architecture": {"profile_alias": "strong_text", "permission_mode": "plan", "timeout_seconds": 600, "reason": "Highest local score for architecture reasoning."},
             "multimodal": {"profile_alias": "multimodal", "permission_mode": "plan", "timeout_seconds": 600, "reason": "Highest local score for multimodal tasks."},
             "ops": {"profile_alias": "ops", "permission_mode": "plan", "timeout_seconds": 420, "reason": "Stable local model for operational checks."},
@@ -807,10 +925,15 @@ def default_auto_policy() -> dict[str, Any]:
         "role_defaults": {
             "requirements": "normal",
             "architecture": "architecture",
+            "development": "development",
             "security": "security_review",
             "testing": "simple",
             "implementation": "complex_code",
-            "review": "security_review",
+            "review": "review",
+            "performance": "performance_review",
+            "compatibility": "compatibility_review",
+            "documentation": "documentation",
+            "automation": "automation",
             "ops": "ops",
             "multimodal": "multimodal",
         },
@@ -992,12 +1115,24 @@ def selftest() -> dict[str, Any]:
     env = force_utf8_env({})
     decoded = subprocess_text("中文✅".encode("utf-8"))
     claude_md = build_claude_md("review", "selftest")
+    sample_github_token = "ghp_" + ("1" * 36)
+    sample_api_key = "sk-" + "testSecretValue"
+    redacted = str(redact(f"token {sample_github_token} {sample_api_key}"))
+    try:
+        safe_run_dir("../bad")
+        run_id_rejected = False
+    except OrchestratorError:
+        run_id_rejected = True
+    worker_env = build_worker_env({"ANTHROPIC_API_KEY": sample_api_key})
     checks = {
         "utf8_env": env.get("PYTHONIOENCODING") == "utf-8" and env.get("PYTHONUTF8") == "1",
         "timeout_bytes_decode": decoded == "中文✅",
         "policy_exists": POLICY_PATH.exists(),
         "agents_exists": AGENTS_PATH.exists(),
         "claude_md_template": "Assigned role: review" in claude_md and CLAUDE_MD_MARKER_BEGIN in claude_md,
+        "secret_redaction": sample_github_token not in redacted and sample_api_key not in redacted,
+        "run_id_validation": run_id_rejected,
+        "worker_env_allowlist": "ANTHROPIC_API_KEY" in worker_env and "GITHUB_TOKEN" not in worker_env and "NPM_TOKEN" not in worker_env,
     }
     return {
         "ok": all(checks.values()),
@@ -1012,7 +1147,7 @@ def last_run(run_id: str | None = None, include_output: bool = True) -> dict[str
         if not latest_path.exists():
             raise OrchestratorError("No runs found yet.")
         run_id = latest_path.read_text(encoding="utf-8").strip()
-    run_dir = RUNS_DIR / run_id
+    run_dir = safe_run_dir(run_id)
     metadata_path = run_dir / "metadata.json"
     if not metadata_path.exists():
         raise OrchestratorError(f"Run metadata not found: {run_id}")
