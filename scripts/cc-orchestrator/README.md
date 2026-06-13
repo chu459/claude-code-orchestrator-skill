@@ -10,6 +10,24 @@ The server discovers CCSwitch from environment variables and the current user ho
 - `cc_list_profiles` lists Claude profiles from CCSwitch with secrets redacted.
 - `cc_pick_profile` explains which profile would be selected for a role/task.
 - `cc_run_agent` runs Claude Code once with a selected role/profile and records logs.
+- `cc_run_streaming_agent` starts Claude Code as a background worker with `stream-json` events.
+- `cc_poll_run` polls a run for status, stdout/stderr deltas, event deltas, latest phase, and tool calls.
+- `cc_stop_run` terminates a specific run id.
+- `cc_run_status` lists active streaming workers or inspects one run.
+- `cc_send_instruction` stops and restarts a run with recovered context and a new instruction.
+- `cc_spawn_role_team` starts multiple role workers and writes a team manifest.
+- `cc_collect_team_results` summarizes team output, repeated agreements, and conflicts/risks.
+- `cc_cross_review` launches second-round reviewer workers over previous outputs.
+- `cc_preflight_write_scope` writes allowed/denied path rules before write-enabled work.
+- `cc_diff_summary` summarizes changed files, line counts, risk markers, and test need.
+- `cc_secret_scan_run` scans run output/events/diff for leaked credentials.
+- `cc_rollback_run` conservatively rolls back only when a clean git snapshot proves it is safe.
+- `cc_benchmark_model` plans or runs a small real benchmark task.
+- `cc_calibrate_policy` records local model preference notes.
+- `cc_cost_guard` configures max concurrency and timeout guardrails.
+- `cc_dashboard` generates a local HTML worker dashboard.
+- `cc_open_run_folder` opens or returns a run log directory.
+- `cc_export_report` writes a Markdown report for a run or team.
 - `cc_run_visible_agent` opens Claude Code in a visible PowerShell window with the selected profile.
 - `cc_last_run` returns the latest run metadata and tail output.
 - `cc_git_diff` returns a capped `git diff` for post-run review.
@@ -24,7 +42,9 @@ Write access is disabled by default in `config/model_policy.json`. A caller must
 
 - CLI and MCP JSON output force UTF-8 so Chinese text and symbols do not crash Windows GBK consoles.
 - Child Claude Code runs receive UTF-8 Python environment variables, and visible PowerShell sessions set UTF-8 input/output encoding.
+- Streaming runs write `events.ndjson` in real time from Claude Code `--output-format stream-json --verbose --include-partial-messages`.
 - If a run times out, the orchestrator stores any partial stdout/stderr that Python exposes in `runs/<run_id>/stdout.txt` and `stderr.txt`.
+- Use `stop-run` / `cc_stop_run` for runaway workers. It requires an explicit run id.
 - For large multi-agent work, prefer several short role-specific prompts over one broad prompt. Then use `last-run` or `cc_last_run` to inspect saved tails before retrying.
 
 ## Run
@@ -56,6 +76,15 @@ python tools\cc-orchestrator\cc_orchestrator.py write-reports
 python tools\cc-orchestrator\cc_orchestrator.py write-claude-md --cwd . --role implementation
 python tools\cc-orchestrator\cc_orchestrator.py pick --role implementation --task-type complex_code
 python tools\cc-orchestrator\cc_orchestrator.py workflow-plan "Fix the bug"
+python tools\cc-orchestrator\cc_orchestrator.py run-streaming "Review this project" --role review
+python tools\cc-orchestrator\cc_orchestrator.py run-status
+python tools\cc-orchestrator\cc_orchestrator.py poll-run --run-id RUN_ID
+python tools\cc-orchestrator\cc_orchestrator.py stop-run --run-id RUN_ID --force
+python tools\cc-orchestrator\cc_orchestrator.py spawn-role-team "Audit this project" --roles requirements,architecture,security,testing
+python tools\cc-orchestrator\cc_orchestrator.py collect-team-results --team-id TEAM_ID
+python tools\cc-orchestrator\cc_orchestrator.py diff-summary --cwd .
+python tools\cc-orchestrator\cc_orchestrator.py secret-scan-run --run-id RUN_ID
+python tools\cc-orchestrator\cc_orchestrator.py dashboard
 python tools\cc-orchestrator\cc_orchestrator.py run-visible "Inspect this project" --role architecture
 ```
 

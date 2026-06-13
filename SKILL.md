@@ -104,6 +104,67 @@ Run Claude Code non-interactively:
 python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" run "TASK" --role development
 ```
 
+Run Claude Code as a streaming background worker:
+
+```powershell
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" run-streaming "TASK" --role review
+```
+
+Poll a streaming run:
+
+```powershell
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" poll-run --run-id RUN_ID
+```
+
+List active streaming workers:
+
+```powershell
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" run-status
+```
+
+Stop a runaway worker:
+
+```powershell
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" stop-run --run-id RUN_ID --force
+```
+
+Spawn a role team:
+
+```powershell
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" spawn-role-team "TASK" --roles requirements,architecture,security,testing
+```
+
+Collect and cross-review team output:
+
+```powershell
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" collect-team-results --team-id TEAM_ID
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" cross-review --run-id RUN_ID --run-id RUN_ID
+```
+
+Preflight writes and inspect risk:
+
+```powershell
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" preflight-write-scope --cwd PROJECT_PATH --allow src --deny .env --max-diff-lines 800
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" diff-summary --cwd PROJECT_PATH
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" secret-scan-run --run-id RUN_ID
+```
+
+Benchmark, calibrate, and guard cost:
+
+```powershell
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" benchmark-model --profile PROFILE --execute
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" calibrate-policy --preference coding=glm-5 --preference multimodal=qwen3.7-plus
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" cost-guard --max-concurrent 4 --max-timeout-seconds 1200 --apply
+```
+
+Generate operator artifacts:
+
+```powershell
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" dashboard
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" open-run-folder --run-id RUN_ID
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" export-report --run-id RUN_ID
+```
+
 For long multi-agent work, split prompts into short role-specific tasks and set a clear timeout. If a run times out, inspect the saved run folder instead of rerunning blindly:
 
 ```powershell
@@ -137,6 +198,7 @@ python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" diff --cwd "PROJECT_PATH"
 - If the user wants to watch Claude Code work, use `run-visible`.
 - Windows Chinese output is handled with UTF-8 stdio and child-process UTF-8 env. If a host still renders text strangely, rely on the UTF-8 files under `runs/<run_id>/`.
 - Timeout output is preserved when the subprocess exposes partial stdout/stderr; use `last-run` to recover the tails.
+- For live control, prefer `run-streaming`: it uses Claude Code `stream-json`, writes `events.ndjson`, and enables `poll-run`, `run-status`, and `stop-run`.
 - When Claude Code needs a stable persona, project rules, or role-specific worker behavior, write `CLAUDE.md` first with `write-claude-md` or MCP tool `cc_write_claude_md`, then run the sub-agent from that project cwd.
 
 ## Four-Phase Workflow
@@ -160,7 +222,25 @@ before launching a full workflow.
 
 Use the same role names through MCP:
 
-- `cc_pick_profile`, `cc_run_agent`, `cc_run_visible_agent`, and `cc_write_claude_md` accept `role`.
+- `cc_pick_profile`, `cc_run_agent`, `cc_run_streaming_agent`, `cc_run_visible_agent`, and `cc_write_claude_md` accept `role`.
+- `cc_run_streaming_agent` starts a background Claude Code worker and writes `events.ndjson`.
+- `cc_poll_run` reads current status, event deltas, stdout/stderr deltas, tool calls, phase, and elapsed time.
+- `cc_stop_run` terminates a specific run id.
+- `cc_run_status` lists active workers or returns one run's status.
+- `cc_send_instruction` stops and restarts a non-interactive run with recovered context and a new instruction.
+- `cc_spawn_role_team` starts multiple role workers and writes a team manifest.
+- `cc_collect_team_results` summarizes team outputs and marks repeated agreements plus explicit conflicts/risks.
+- `cc_cross_review` launches second-round reviewer workers over previous outputs.
+- `cc_preflight_write_scope` writes allowed/denied paths and max diff rules before write-enabled work.
+- `cc_diff_summary` summarizes changed files, line counts, risk markers, and test need.
+- `cc_secret_scan_run` scans run logs/events/diff for leaked credentials.
+- `cc_rollback_run` conservatively rolls back when a clean pre-run git snapshot proves it is safe.
+- `cc_benchmark_model` can run a small real benchmark task when `execute=true`.
+- `cc_calibrate_policy` persists local model preference notes.
+- `cc_cost_guard` stores max concurrency and timeout guardrails.
+- `cc_dashboard` generates a local HTML worker dashboard.
+- `cc_open_run_folder` opens or returns a run log directory.
+- `cc_export_report` writes a Markdown report for a run or team.
 - `role` supports `requirements`, `development`, `testing`, `review`, `performance`, `compatibility`, `documentation`, `automation`, `security`, `ops`, plus `architecture`, `implementation`, and `multimodal`.
 - `task_type` supports `simple`, `normal`, `complex_code`, `development`, `review`, `security_review`, `performance_review`, `compatibility_review`, `documentation`, `automation`, `architecture`, `multimodal`, and `ops`.
 - `cc_workflow_plan` returns `controller: codex`, `worker_roles`, and one route per configured role.

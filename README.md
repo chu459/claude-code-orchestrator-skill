@@ -186,6 +186,46 @@ Run a read-only architecture worker:
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" run "Map this repository architecture" --role architecture
 ```
 
+Run a streaming background worker:
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" run-streaming "Review this repository" --role review
+```
+
+Poll, list, or stop workers:
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" poll-run --run-id <run_id>
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" run-status
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" stop-run --run-id <run_id> --force
+```
+
+Spawn and collect a role team:
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" spawn-role-team "Audit this repository" --roles requirements,architecture,security,testing
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" collect-team-results --team-id <team_id>
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" cross-review --run-id <run_id> --run-id <run_id>
+```
+
+Safety and acceptance helpers:
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" preflight-write-scope --cwd /path/to/project --allow src --deny .env --max-diff-lines 800
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" diff-summary --cwd /path/to/project
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" secret-scan-run --run-id <run_id>
+```
+
+Scheduling and reporting:
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" benchmark-model --profile PROFILE --execute
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" calibrate-policy --preference coding=glm-5 --preference multimodal=qwen3.7-plus
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" cost-guard --max-concurrent 4 --max-timeout-seconds 1200 --apply
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" dashboard
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" export-report --run-id <run_id>
+```
+
 Open a visible Claude Code worker window:
 
 ```bash
@@ -206,6 +246,24 @@ python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" last-run
 | `cc_list_profiles` | List CCSwitch profiles |
 | `cc_pick_profile` | Pick a profile/model for a role |
 | `cc_run_agent` | Run a Claude Code worker |
+| `cc_run_streaming_agent` | Start a background Claude Code worker with `stream-json` events |
+| `cc_poll_run` | Poll one run for status, output deltas, tool calls, phase, and elapsed time |
+| `cc_stop_run` | Stop a specific running Claude Code worker |
+| `cc_run_status` | List active Claude Code workers or inspect one run |
+| `cc_send_instruction` | Stop and restart a run with recovered context and a new instruction |
+| `cc_spawn_role_team` | Start several role workers at once |
+| `cc_collect_team_results` | Summarize team output and mark agreements/conflicts |
+| `cc_cross_review` | Launch second-round reviewer workers |
+| `cc_preflight_write_scope` | Fix allowed paths, denied paths, and max diff before writes |
+| `cc_diff_summary` | Summarize changed files, risks, and test need |
+| `cc_secret_scan_run` | Scan run logs/events/diff for leaked secrets |
+| `cc_rollback_run` | Conservative rollback when git snapshots prove it is safe |
+| `cc_benchmark_model` | Run or plan a small model benchmark |
+| `cc_calibrate_policy` | Persist local model preference notes |
+| `cc_cost_guard` | Configure max concurrency and timeout guardrails |
+| `cc_dashboard` | Generate a local HTML worker dashboard |
+| `cc_open_run_folder` | Open or return a run log folder |
+| `cc_export_report` | Export a run or team Markdown report |
 | `cc_run_visible_agent` | Open a visible Claude Code worker |
 | `cc_last_run` | Inspect last run |
 | `cc_git_diff` | Inspect git diff |
@@ -319,30 +377,34 @@ The default posture is intentionally conservative:
 
 What works today:
 
-1. use `run-visible` to watch Claude Code in a real terminal window
-2. use `last-run` to inspect the latest run metadata and tails
-3. tail the saved stdout/stderr files
+1. use `run-streaming` to start Claude Code with `--output-format stream-json --include-partial-messages`
+2. read live events from `events.ndjson`
+3. use `poll-run` to inspect one run's status, stdout/stderr deltas, latest phase, and tool calls
+4. use `run-status` to list active workers
+5. use `stop-run` to terminate a runaway worker
+6. use `run-visible` when the user wants a real terminal window
 
 Windows:
 
 ```powershell
 Get-Content "$env:CC_ORCHESTRATOR_HOME\runs\<run_id>\stdout.txt" -Wait
+Get-Content "$env:CC_ORCHESTRATOR_HOME\runs\<run_id>\events.ndjson" -Wait
 ```
 
 macOS / Linux:
 
 ```bash
 tail -f "$CC_ORCHESTRATOR_HOME/runs/<run_id>/stdout.txt"
+tail -f "$CC_ORCHESTRATOR_HOME/runs/<run_id>/events.ndjson"
 ```
 
-The next serious upgrade is an event stream:
+The P0 live-control loop is:
 
 ```text
-events.jsonl
-cc_watch_runs
-cc_run_status
-terminal dashboard
-Codex live polling
+cc_run_streaming_agent -> events.ndjson
+cc_poll_run -> latest output, tool calls, phase, elapsed time
+cc_run_status -> active worker list
+cc_stop_run -> kill a stuck or expensive worker
 ```
 
 Full design notes:
@@ -373,13 +435,18 @@ It is about bringing model cost, context cost, worker cost, and human attention 
 - [x] UTF-8 safe Windows output
 - [x] Run logs and `last-run`
 - [x] `CLAUDE.md` worker persona writer
-- [ ] Live event stream
-- [ ] Terminal dashboard
+- [x] Live event stream with `events.ndjson`
+- [x] Poll/stop/status tools for live control
+- [x] Role team spawning and result collection
+- [x] Cross-review worker loop
+- [x] Preflight write-scope file
+- [x] Diff summary and secret scan helpers
+- [x] Conservative rollback helper
+- [x] Model benchmark/calibration entrypoints
+- [x] Cost guard policy
+- [x] Local HTML dashboard
 - [ ] Web dashboard
-- [ ] Cost budget policy
-- [ ] Parallel run coordinator
 - [ ] Agent result voting
-- [ ] Automatic cross-review
 
 <h2 align="center">License</h2>
 

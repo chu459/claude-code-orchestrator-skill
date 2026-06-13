@@ -1,6 +1,12 @@
-# Real-Time Progress Design
+# Real-Time Progress
 
-The current version stores every run under:
+P0 live control is implemented.
+
+Codex no longer has to wait for Claude Code to finish before seeing progress.
+
+## Run Folder
+
+Each streaming run writes:
 
 ```text
 scripts/cc-orchestrator/runs/<run_id>/
@@ -8,57 +14,118 @@ scripts/cc-orchestrator/runs/<run_id>/
   prompt.txt
   stdout.txt
   stderr.txt
+  events.ndjson
+  pid.txt
 ```
 
-## What works today
+`events.ndjson` is one JSON event per line.
 
-Use visible Claude Code windows when you want to watch an agent think and act:
+Important event types:
+
+- `run_started`
+- `stream_worker_started`
+- `process_started`
+- `claude_stream`
+- `stderr`
+- `stop_requested`
+- `stopped`
+- `timeout`
+- `process_exited`
+
+## Start A Streaming Worker
 
 ```powershell
-python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" run-visible "Inspect this project" --role architecture
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" run-streaming "Inspect this project" --role architecture
 ```
 
-Use `last-run` after any run:
+The command returns immediately with:
+
+- `run_id`
+- worker pid
+- selected profile/model
+- log paths
+- poll offsets
+
+The launched Claude Code command uses:
+
+```text
+claude -p --output-format stream-json --verbose --include-partial-messages
+```
+
+## Poll One Run
 
 ```powershell
-python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" last-run
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" poll-run --run-id <run_id>
 ```
 
-Tail logs on Windows:
+`poll-run` returns:
+
+- current status
+- active/alive flags
+- elapsed time
+- stdout/stderr deltas
+- event deltas
+- latest phase
+- recent tool calls
+- output tails
+
+For cursor-style polling, pass the returned offsets:
 
 ```powershell
-Get-Content "$env:CC_ORCHESTRATOR_HOME\runs\<run_id>\stdout.txt" -Wait
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" poll-run `
+  --run-id <run_id> `
+  --stdout-offset 1200 `
+  --stderr-offset 0 `
+  --event-offset 3400
 ```
 
-Tail logs on macOS/Linux:
+## List Active Workers
 
-```bash
-tail -f "$CC_ORCHESTRATOR_HOME/runs/<run_id>/stdout.txt"
+```powershell
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" run-status
 ```
 
-## Better live-progress idea
+This returns all active streaming workers.
 
-The next serious upgrade is a tiny progress bus:
+To inspect one run:
 
-1. Each agent writes `events.jsonl` while it runs.
-2. MCP exposes `cc_watch_runs` and `cc_run_status`.
-3. Codex reads the event stream every few seconds.
-4. A terminal dashboard shows:
-   - agent role
-   - selected model
-   - elapsed time
-   - current phase
-   - last stdout line
-   - estimated cost class
-   - timeout risk
+```powershell
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" run-status --run-id <run_id> --include-output
+```
 
-## Why this matters
+## Stop A Worker
 
-The whole point of the project is cost management:
+```powershell
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" stop-run --run-id <run_id> --force
+```
 
-- one strong model acts as the brain
-- worker models act as hands
-- Codex remains the manager
-- logs make every worker auditable
+`stop-run` requires an explicit run id so Codex does not accidentally kill the wrong worker.
 
-No invisible magic. Every worker leaves a trace.
+On Windows, the orchestrator uses `taskkill /PID <pid> /T` and adds `/F` when force is requested.
+
+## MCP Tools
+
+The same P0 loop is available through MCP:
+
+```text
+cc_run_streaming_agent
+cc_poll_run
+cc_run_status
+cc_stop_run
+```
+
+## Why This Matters
+
+This is the difference between:
+
+```text
+wait for Claude Code to finish
+```
+
+and:
+
+```text
+Codex watches, polls, and stops workers in real time
+```
+
+That is the control layer needed for serious multi-agent work.

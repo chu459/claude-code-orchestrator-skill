@@ -9,9 +9,11 @@ import json
 import os
 import re
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -52,8 +54,13 @@ configure_stdio()
 ROOT = Path(__file__).resolve().parent
 CONFIG_DIR = ROOT / "config"
 RUNS_DIR = ROOT / "runs"
+TEAMS_DIR = RUNS_DIR / "teams"
+REPORTS_DIR = ROOT / "reports"
+DASHBOARD_DIR = ROOT / "dashboard"
 POLICY_PATH = CONFIG_DIR / "model_policy.json"
 AGENTS_PATH = CONFIG_DIR / "agents.json"
+CALIBRATION_PATH = CONFIG_DIR / "model_calibration.json"
+COST_GUARD_PATH = CONFIG_DIR / "cost_guard.json"
 CLAUDE_MD_MARKER_BEGIN = "<!-- claude-code-orchestrator:begin -->"
 CLAUDE_MD_MARKER_END = "<!-- claude-code-orchestrator:end -->"
 SECRET_KEY_RE = re.compile(r"(key|token|secret|authorization|auth)", re.IGNORECASE)
@@ -73,6 +80,7 @@ SECRET_VALUE_RE = re.compile(
 )
 ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 RUN_ID_RE = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{8}$")
+TEAM_ID_RE = re.compile(r"^team-\d{8}T\d{6}Z-[0-9a-f]{8}$")
 PASSTHROUGH_ENV_KEYS = {
     "PATH",
     "Path",
@@ -89,6 +97,7 @@ PASSTHROUGH_ENV_KEYS = {
     "APPDATA",
     "LOCALAPPDATA",
     "PROGRAMDATA",
+    "CLAUDE_CODE_BIN",
     "LANG",
     "LC_ALL",
     "LC_CTYPE",
@@ -233,7 +242,9 @@ def _existing_claude_candidates() -> list[str]:
     candidates: list[str] = []
     explicit = os.environ.get("CLAUDE_CODE_BIN")
     if explicit:
-        candidates.append(explicit)
+        resolved = shutil.which(explicit) if not Path(explicit).is_absolute() else explicit
+        if resolved and (Path(resolved).exists() or shutil.which(resolved)):
+            candidates.append(resolved)
     try:
         proc = subprocess.run(["where.exe", "claude"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10)
         if proc.returncode == 0:
@@ -268,6 +279,8 @@ def _existing_claude_candidates() -> list[str]:
         if Path(resolved).exists() or shutil.which(resolved):
             seen.add(resolved)
             existing.append(resolved)
+    if explicit and existing:
+        return existing[:1] + sorted(existing[1:], key=_claude_candidate_rank)
     return sorted(existing, key=_claude_candidate_rank)
 
 
@@ -321,6 +334,223 @@ def safe_run_dir(run_id: str) -> Path:
     except ValueError as exc:
         raise OrchestratorError(f"Run id resolves outside run directory: {run_id}") from exc
     return run_dir
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def new_run_id() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
+
+
+def read_metadata(run_dir: Path) -> dict[str, Any]:
+    metadata_path = run_dir / "metadata.json"
+    if not metadata_path.exists():
+        raise OrchestratorError(f"Run metadata not found: {run_dir.name}")
+    return json.loads(metadata_path.read_text(encoding="utf-8"))
+
+
+def write_metadata(run_dir: Path, metadata: dict[str, Any]) -> None:
+    (run_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def update_metadata(run_dir: Path, **updates: Any) -> dict[str, Any]:
+    metadata = read_metadata(run_dir)
+    metadata.update(updates)
+    write_metadata(run_dir, metadata)
+    return metadata
+
+
+def pid_alive(pid: int | None) -> bool:
+    if not pid or pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            proc = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+            )
+            return proc.returncode == 0 and re.search(rf'"[^"]+","{pid}"[,"]', proc.stdout or "") is not None
+        except Exception:
+            return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def terminate_process_tree(pid: int, force: bool = False, wait_seconds: int = 5) -> dict[str, Any]:
+    """Terminate a process and its children where the platform supports it."""
+    if pid <= 0:
+        return {"pid": pid, "attempted": False, "alive": False, "method": "invalid-pid"}
+    if not pid_alive(pid):
+        return {"pid": pid, "attempted": False, "alive": False, "method": "already-exited"}
+    method = "os.kill"
+    if os.name == "nt":
+        cmd = ["taskkill", "/PID", str(pid), "/T"]
+        if force:
+            cmd.append("/F")
+        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=max(wait_seconds, 1) + 5)
+        time.sleep(min(max(wait_seconds, 1), 5))
+        alive = pid_alive(pid)
+        return {
+            "pid": pid,
+            "attempted": True,
+            "alive": alive,
+            "method": "taskkill",
+            "exit_code": proc.returncode,
+            "stdout": str(redact(proc.stdout or ""))[-1000:],
+            "stderr": str(redact(proc.stderr or ""))[-1000:],
+        }
+    sig = signal.SIGKILL if force else signal.SIGTERM
+    try:
+        try:
+            os.killpg(os.getpgid(pid), sig)
+            method = "os.killpg"
+        except Exception:
+            os.kill(pid, sig)
+        deadline = time.time() + max(wait_seconds, 1)
+        while time.time() < deadline and pid_alive(pid):
+            time.sleep(0.1)
+        return {"pid": pid, "attempted": True, "alive": pid_alive(pid), "method": method, "signal": int(sig)}
+    except OSError as exc:
+        return {"pid": pid, "attempted": True, "alive": pid_alive(pid), "method": method, "error": str(exc)}
+
+
+def read_file_delta(path: Path, offset: int = 0, max_bytes: int = 20000) -> dict[str, Any]:
+    if offset < 0:
+        raise OrchestratorError("Offset cannot be negative.")
+    if max_bytes < 1:
+        raise OrchestratorError("max_bytes must be positive.")
+    if not path.exists():
+        return {"path": str(path), "text": "", "offset": offset, "next_offset": offset, "size": 0, "truncated": False}
+    size = path.stat().st_size
+    if offset > size:
+        offset = size
+    with path.open("rb") as handle:
+        handle.seek(offset)
+        data = handle.read(max_bytes)
+    next_offset = offset + len(data)
+    text = data.decode("utf-8", errors="replace")
+    return {
+        "path": str(path),
+        "text": str(redact(text)),
+        "offset": offset,
+        "next_offset": next_offset,
+        "size": size,
+        "truncated": next_offset < size,
+    }
+
+
+def tail_file(path: Path, chars: int = 4000) -> str:
+    if chars <= 0 or not path.exists():
+        return ""
+    size = path.stat().st_size
+    with path.open("rb") as handle:
+        handle.seek(max(0, size - max(chars * 4, 4096)))
+        data = handle.read()
+    return str(redact(data.decode("utf-8", errors="replace")[-chars:]))
+
+
+def last_nonempty_line(text: str) -> str:
+    for line in reversed(text.splitlines()):
+        if line.strip():
+            return line[-1000:]
+    return ""
+
+
+def extract_event_phase(payload: Any, source: str) -> str | None:
+    if source == "stderr":
+        return "stderr"
+    if not isinstance(payload, dict):
+        return None
+    event_type = str(payload.get("type") or payload.get("event") or payload.get("subtype") or "").lower()
+    if "tool" in event_type:
+        return "tool"
+    if event_type in {"system", "init", "started", "start"}:
+        return "started"
+    if event_type in {"assistant", "message", "content_block_delta", "content_block_start"}:
+        return "responding"
+    if event_type in {"result", "complete", "completed", "done"}:
+        return "finished"
+    content = payload.get("message", {}).get("content") if isinstance(payload.get("message"), dict) else payload.get("content")
+    if isinstance(content, list):
+        for item in content:
+            if isinstance(item, dict) and str(item.get("type", "")).lower() == "tool_use":
+                return "tool"
+    return None
+
+
+def extract_tool_calls_from_payload(payload: Any) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            value_type = str(value.get("type", "")).lower()
+            if value_type == "tool_use" or "tool" in value_type and ("name" in value or "tool_name" in value):
+                calls.append(
+                    {
+                        "id": value.get("id"),
+                        "name": value.get("name") or value.get("tool_name"),
+                        "type": value.get("type"),
+                    }
+                )
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(payload)
+    return calls
+
+
+def append_event(run_dir: Path, event: dict[str, Any]) -> None:
+    seq_path = run_dir / "event_seq.txt"
+    try:
+        seq = int(seq_path.read_text(encoding="utf-8").strip() or "0") + 1
+    except (FileNotFoundError, ValueError):
+        seq = 1
+    event.setdefault("seq", seq)
+    event.setdefault("ts", utc_now_iso())
+    event.setdefault("run_id", run_dir.name)
+    path = run_dir / "events.ndjson"
+    with path.open("a", encoding="utf-8", errors="replace") as handle:
+        handle.write(json.dumps(redact(event), ensure_ascii=False) + "\n")
+    seq_path.write_text(str(seq), encoding="utf-8")
+
+
+def parse_events_delta(path: Path, offset: int = 0, max_bytes: int = 20000) -> dict[str, Any]:
+    delta = read_file_delta(path, offset=offset, max_bytes=max_bytes)
+    events: list[dict[str, Any]] = []
+    for line in delta["text"].splitlines():
+        if not line.strip():
+            continue
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            events.append({"type": "unparsed", "text": line})
+    return {**delta, "events": events}
+
+
+def summarize_events(events: list[dict[str, Any]]) -> dict[str, Any]:
+    phase = None
+    tool_calls: list[dict[str, Any]] = []
+    for event in events:
+        payload = event.get("payload") if isinstance(event, dict) else None
+        event_phase = extract_event_phase(payload, str(event.get("source", ""))) if isinstance(event, dict) else None
+        if event_phase:
+            phase = event_phase
+        tool_calls.extend(extract_tool_calls_from_payload(payload))
+    return {"latest_phase": phase, "tool_calls": tool_calls[-20:]}
 
 
 def list_profiles(ccswitch_home: str | Path | None = None, include_secrets: bool = False) -> list[dict[str, Any]]:
@@ -636,6 +866,47 @@ def build_prompt(role: str, task: str, context: str | None = None) -> str:
     return "\n".join(pieces)
 
 
+def capture_git_snapshot(run_dir: Path, cwd: Path, label: str) -> dict[str, Any]:
+    """Capture git diff/status for audit and conservative rollback."""
+    result = {"ok": False, "label": label, "is_git_repo": False}
+    if not (cwd / ".git").exists():
+        return result
+    try:
+        diff_proc = subprocess.run(
+            ["git", "diff", "--binary", "--", "."],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+        )
+        status_proc = subprocess.run(
+            ["git", "status", "--short"],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+        diff_path = run_dir / f"git_{label}.diff"
+        status_path = run_dir / f"git_{label}_status.txt"
+        diff_path.write_text(str(redact(diff_proc.stdout or diff_proc.stderr or "")), encoding="utf-8")
+        status_path.write_text(str(redact(status_proc.stdout or status_proc.stderr or "")), encoding="utf-8")
+        return {
+            "ok": diff_proc.returncode == 0 and status_proc.returncode == 0,
+            "label": label,
+            "is_git_repo": True,
+            "diff_path": str(diff_path),
+            "status_path": str(status_path),
+            "diff_bytes": diff_path.stat().st_size,
+            "status_bytes": status_path.stat().st_size,
+        }
+    except Exception as exc:
+        return {"ok": False, "label": label, "is_git_repo": True, "error": str(exc)}
+
+
 def run_agent(
     task: str,
     role: str = "implementation",
@@ -657,6 +928,7 @@ def run_agent(
     permission_mode = route["permission_mode"] if not write_enabled else "acceptEdits"
     timeout = timeout_seconds or int(route["timeout_seconds"])
     timeout = min(timeout, int(policy.get("safety", {}).get("max_timeout_seconds", 1800)))
+    timeout = enforce_cost_guard(route.get("model_override") or provider.model, timeout)
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
     run_dir = RUNS_DIR / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
@@ -697,6 +969,7 @@ def run_agent(
         "route_reason": route.get("reason", ""),
         "command": redact(cmd),
     }
+    metadata["git_before"] = capture_git_snapshot(run_dir, effective_cwd, "before")
     (run_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
     (run_dir / "prompt.txt").write_text(safe_prompt, encoding="utf-8")
     try:
@@ -732,6 +1005,7 @@ def run_agent(
             "timed_out": timed_out,
             "stdout_path": str(run_dir / "stdout.txt"),
             "stderr_path": str(run_dir / "stderr.txt"),
+            "git_after": capture_git_snapshot(run_dir, effective_cwd, "after"),
         }
     )
     (run_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -742,6 +1016,937 @@ def run_agent(
         "stdout_tail": str(safe_stdout)[-4000:],
         "stderr_tail": str(safe_stderr)[-2000:],
     }
+
+
+def run_streaming_agent(
+    task: str,
+    role: str = "implementation",
+    task_type: str | None = None,
+    profile: str | None = None,
+    allow_write: bool = False,
+    timeout_seconds: int | None = None,
+    cwd: Path | None = None,
+    context: str | None = None,
+    output_format: str = "stream-json",
+    include_partial_messages: bool = True,
+) -> dict[str, Any]:
+    """Start Claude Code in the background and stream events to events.ndjson."""
+    if not task.strip():
+        raise OrchestratorError("Task cannot be empty.")
+    route = resolve_route(role=role, task_type=task_type, profile=profile)
+    provider = get_provider(route["profile"])
+    policy = load_json(POLICY_PATH)
+    default_write = bool(policy.get("safety", {}).get("default_write_enabled", False))
+    write_enabled = allow_write or default_write
+    permission_mode = route["permission_mode"] if not write_enabled else "acceptEdits"
+    timeout = timeout_seconds or int(route["timeout_seconds"])
+    timeout = min(timeout, int(policy.get("safety", {}).get("max_timeout_seconds", 1800)))
+    timeout = enforce_cost_guard(route.get("model_override") or provider.model, timeout)
+    if output_format != "stream-json":
+        raise OrchestratorError("run_streaming_agent requires output_format='stream-json'.")
+
+    run_id = new_run_id()
+    run_dir = RUNS_DIR / run_id
+    run_dir.mkdir(parents=True, exist_ok=False)
+    effective_cwd = cwd or Path.cwd()
+    prompt = build_prompt(role, task, context)
+    safe_prompt = str(redact(prompt))
+    prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    prompt_path = run_dir / "prompt.txt"
+    prompt_path.write_text(safe_prompt, encoding="utf-8")
+    stdout_path = run_dir / "stdout.txt"
+    stderr_path = run_dir / "stderr.txt"
+    events_path = run_dir / "events.ndjson"
+    stdout_path.write_text("", encoding="utf-8")
+    stderr_path.write_text("", encoding="utf-8")
+    events_path.write_text("", encoding="utf-8")
+
+    metadata: dict[str, Any] = {
+        "run_id": run_id,
+        "mode": "streaming",
+        "status": "starting",
+        "started_at": utc_now_iso(),
+        "cwd": str(effective_cwd),
+        "role": role,
+        "task_type": route["task_type"],
+        "profile": {
+            "id": provider.id,
+            "name": provider.name,
+            "model": route.get("model_override") or provider.model,
+            "provider_default_model": provider.model,
+            "base_url": provider.env.get("ANTHROPIC_BASE_URL"),
+            "endpoints": provider.endpoints,
+        },
+        "permission_mode": permission_mode,
+        "allow_write": write_enabled,
+        "timeout_seconds": timeout,
+        "output_format": output_format,
+        "include_partial_messages": include_partial_messages,
+        "prompt_sha256": prompt_hash,
+        "route_reason": route.get("reason", ""),
+        "prompt_path": str(prompt_path),
+        "stdout_path": str(stdout_path),
+        "stderr_path": str(stderr_path),
+        "events_path": str(events_path),
+        "worker_pid": None,
+        "child_pid": None,
+    }
+    metadata["git_before"] = capture_git_snapshot(run_dir, effective_cwd, "before")
+    write_metadata(run_dir, metadata)
+    append_event(run_dir, {"type": "run_started", "status": "starting", "role": role, "task_type": route["task_type"]})
+
+    env = build_worker_env(provider.env, route.get("model_override"))
+    worker_cmd = [sys.executable, "-B", str(Path(__file__).resolve()), "_stream-worker", "--run-id", run_id]
+    creationflags = 0
+    popen_kwargs: dict[str, Any] = {}
+    if os.name == "nt":
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    else:
+        popen_kwargs["start_new_session"] = True
+    worker = subprocess.Popen(
+        worker_cmd,
+        cwd=str(ROOT),
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=creationflags,
+        **popen_kwargs,
+    )
+    metadata.update({"worker_pid": worker.pid, "worker_command": redact(worker_cmd)})
+    write_metadata(run_dir, metadata)
+    append_event(run_dir, {"type": "stream_worker_started", "worker_pid": worker.pid})
+    (RUNS_DIR / "latest.txt").write_text(run_id, encoding="utf-8")
+    return {
+        **metadata,
+        "status": "starting",
+        "worker_pid": worker.pid,
+        "poll": {
+            "tool": "cc_poll_run",
+            "run_id": run_id,
+            "event_offset": 0,
+            "stdout_offset": 0,
+            "stderr_offset": 0,
+        },
+    }
+
+
+def stream_worker(run_id: str) -> dict[str, Any]:
+    """Internal worker process. It owns Claude Code pipes for a streaming run."""
+    run_dir = safe_run_dir(run_id)
+    metadata = update_metadata(run_dir, worker_pid=os.getpid())
+    prompt = (run_dir / "prompt.txt").read_text(encoding="utf-8", errors="replace")
+    permission_mode = str(metadata.get("permission_mode", "plan"))
+    output_format = str(metadata.get("output_format", "stream-json"))
+    include_partial_messages = bool(metadata.get("include_partial_messages", True))
+    timeout = int(metadata.get("timeout_seconds") or 1800)
+    cwd = Path(str(metadata.get("cwd") or Path.cwd()))
+    cmd = [
+        claude_bin_path(),
+        "-p",
+        "--output-format",
+        output_format,
+    ]
+    if output_format == "stream-json":
+        cmd.append("--verbose")
+    if include_partial_messages:
+        cmd.append("--include-partial-messages")
+    cmd.extend(
+        [
+            "--permission-mode",
+            permission_mode,
+            "--no-session-persistence",
+            prompt,
+        ]
+    )
+    append_event(run_dir, {"type": "stream_worker_ready", "worker_pid": os.getpid()})
+    creationflags = 0
+    popen_kwargs: dict[str, Any] = {}
+    if os.name == "nt":
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        popen_kwargs["start_new_session"] = True
+    started = time.time()
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(cwd),
+        env=force_utf8_env(dict(os.environ)),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=creationflags,
+        **popen_kwargs,
+    )
+    update_metadata(run_dir, status="running", child_pid=proc.pid, command=redact(cmd))
+    (run_dir / "pid.txt").write_text(str(proc.pid), encoding="utf-8")
+    append_event(run_dir, {"type": "process_started", "pid": proc.pid, "status": "running"})
+    event_lock = threading.Lock()
+
+    def safe_append(event: dict[str, Any]) -> None:
+        with event_lock:
+            append_event(run_dir, event)
+
+    def pump(stream: Any, out_path: Path, source: str) -> None:
+        try:
+            with out_path.open("a", encoding="utf-8", errors="replace") as out:
+                for line in iter(stream.readline, ""):
+                    safe_line = str(redact(line))
+                    out.write(safe_line)
+                    out.flush()
+                    if source == "stdout":
+                        try:
+                            payload: Any = redact(json.loads(line))
+                            event_type = "claude_stream"
+                        except json.JSONDecodeError:
+                            payload = {"text": safe_line.rstrip("\r\n")}
+                            event_type = "stdout"
+                    else:
+                        payload = {"text": safe_line.rstrip("\r\n")}
+                        event_type = "stderr"
+                    phase = extract_event_phase(payload, source)
+                    event = {"type": event_type, "source": source, "payload": payload}
+                    if phase:
+                        event["phase"] = phase
+                    safe_append(event)
+        except Exception as exc:
+            safe_append({"type": "stream_pump_error", "source": source, "error": str(exc)})
+
+    threads = [
+        threading.Thread(target=pump, args=(proc.stdout, run_dir / "stdout.txt", "stdout"), daemon=True),
+        threading.Thread(target=pump, args=(proc.stderr, run_dir / "stderr.txt", "stderr"), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+
+    timed_out = False
+    stopped = False
+    exit_code: int | None = None
+    try:
+        while True:
+            exit_code = proc.poll()
+            if exit_code is not None:
+                break
+            if (run_dir / "stop-requested.json").exists():
+                stopped = True
+                terminate_process_tree(proc.pid, force=False, wait_seconds=5)
+            if time.time() - started > timeout:
+                timed_out = True
+                safe_append({"type": "timeout", "timeout_seconds": timeout})
+                terminate_process_tree(proc.pid, force=False, wait_seconds=5)
+                if pid_alive(proc.pid):
+                    terminate_process_tree(proc.pid, force=True, wait_seconds=2)
+            time.sleep(0.2)
+        try:
+            exit_code = proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            terminate_process_tree(proc.pid, force=True, wait_seconds=2)
+            exit_code = proc.poll()
+    finally:
+        for thread in threads:
+            thread.join(timeout=2)
+
+    duration_ms = int((time.time() - started) * 1000)
+    latest_metadata = read_metadata(run_dir)
+    stopped = stopped or bool(latest_metadata.get("stop_requested_at"))
+    if timed_out:
+        status = "timed_out"
+        final_exit = 124 if exit_code is None else exit_code
+    elif stopped:
+        status = "stopped"
+        final_exit = -15 if exit_code is None else exit_code
+    else:
+        final_exit = 0 if exit_code is None else exit_code
+        status = "succeeded" if final_exit == 0 else "failed"
+    final_metadata = update_metadata(
+        run_dir,
+        status=status,
+        finished_at=utc_now_iso(),
+        duration_ms=duration_ms,
+        exit_code=final_exit,
+        timed_out=timed_out,
+        stdout_path=str(run_dir / "stdout.txt"),
+        stderr_path=str(run_dir / "stderr.txt"),
+        events_path=str(run_dir / "events.ndjson"),
+        git_after=capture_git_snapshot(run_dir, cwd, "after"),
+    )
+    append_event(run_dir, {"type": "process_exited", "status": status, "exit_code": final_exit, "duration_ms": duration_ms})
+    return final_metadata
+
+
+def single_run_status(run_id: str, include_output_tail: bool = True, tail_chars: int = 4000) -> dict[str, Any]:
+    run_dir = safe_run_dir(run_id)
+    metadata = read_metadata(run_dir)
+    status = str(metadata.get("status") or "unknown")
+    child_pid = metadata.get("child_pid")
+    worker_pid = metadata.get("worker_pid")
+    child_alive = pid_alive(int(child_pid)) if child_pid else False
+    worker_alive = pid_alive(int(worker_pid)) if worker_pid else False
+    active = status in {"starting", "running", "stop_requested"} and (child_alive or worker_alive)
+    if status in {"starting", "running", "stop_requested"} and not active:
+        if metadata.get("finished_at") or metadata.get("exit_code") is not None:
+            exit_code = metadata.get("exit_code")
+            if status == "stop_requested":
+                status = "stopped"
+            elif metadata.get("timed_out"):
+                status = "timed_out"
+            else:
+                status = "succeeded" if exit_code == 0 else "failed"
+        else:
+            status = "lost"
+    started_at = metadata.get("started_at")
+    finished_at = metadata.get("finished_at")
+    elapsed_ms = metadata.get("duration_ms")
+    if elapsed_ms is None and started_at:
+        try:
+            started_dt = datetime.fromisoformat(str(started_at))
+            end_dt = datetime.fromisoformat(str(finished_at)) if finished_at else datetime.now(timezone.utc)
+            elapsed_ms = int((end_dt - started_dt).total_seconds() * 1000)
+        except Exception:
+            elapsed_ms = None
+    stdout_path = run_dir / "stdout.txt"
+    stderr_path = run_dir / "stderr.txt"
+    events_path = run_dir / "events.ndjson"
+    event_tail = tail_file(events_path, chars=20000)
+    events: list[dict[str, Any]] = []
+    for line in event_tail.splitlines()[-200:]:
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    event_summary = summarize_events(events)
+    stdout_tail = tail_file(stdout_path, chars=tail_chars)
+    stderr_tail = tail_file(stderr_path, chars=min(tail_chars, 2000))
+    result = {
+        "ok": True,
+        "run_id": run_id,
+        "status": status,
+        "active": active,
+        "worker_pid": worker_pid,
+        "child_pid": child_pid,
+        "worker_alive": worker_alive,
+        "child_alive": child_alive,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "elapsed_ms": elapsed_ms,
+        "exit_code": metadata.get("exit_code"),
+        "timed_out": bool(metadata.get("timed_out", False)),
+        "role": metadata.get("role"),
+        "task_type": metadata.get("task_type"),
+        "profile": metadata.get("profile"),
+        "latest_phase": event_summary.get("latest_phase"),
+        "tool_calls": event_summary.get("tool_calls", []),
+        "stdout_bytes": stdout_path.stat().st_size if stdout_path.exists() else 0,
+        "stderr_bytes": stderr_path.stat().st_size if stderr_path.exists() else 0,
+        "events_bytes": events_path.stat().st_size if events_path.exists() else 0,
+        "last_stdout_line": last_nonempty_line(stdout_tail),
+        "last_stderr_line": last_nonempty_line(stderr_tail),
+        "paths": {
+            "run_dir": str(run_dir),
+            "metadata": str(run_dir / "metadata.json"),
+            "stdout": str(stdout_path),
+            "stderr": str(stderr_path),
+            "events": str(events_path),
+        },
+    }
+    if include_output_tail:
+        result["stdout_tail"] = stdout_tail
+        result["stderr_tail"] = stderr_tail
+    return result
+
+
+def run_status(
+    run_id: str | None = None,
+    include_output_tail: bool = False,
+    tail_chars: int = 4000,
+    include_finished: bool = False,
+    limit: int = 50,
+) -> dict[str, Any]:
+    RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    if run_id:
+        return single_run_status(run_id, include_output_tail=include_output_tail, tail_chars=tail_chars)
+    runs: list[dict[str, Any]] = []
+    candidates = [path for path in RUNS_DIR.iterdir() if path.is_dir() and RUN_ID_RE.match(path.name)]
+    candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    for path in candidates:
+        try:
+            item = single_run_status(path.name, include_output_tail=include_output_tail, tail_chars=tail_chars)
+        except Exception:
+            continue
+        if include_finished or item.get("active"):
+            runs.append(item)
+        if len(runs) >= limit:
+            break
+    return {
+        "ok": True,
+        "active_count": sum(1 for item in runs if item.get("active")),
+        "count": len(runs),
+        "runs": runs,
+    }
+
+
+def poll_run(
+    run_id: str,
+    stdout_offset: int = 0,
+    stderr_offset: int = 0,
+    event_offset: int = 0,
+    max_bytes: int = 20000,
+    include_output_tail: bool = True,
+    tail_chars: int = 4000,
+) -> dict[str, Any]:
+    run_dir = safe_run_dir(run_id)
+    status = single_run_status(run_id, include_output_tail=include_output_tail, tail_chars=tail_chars)
+    stdout_delta = read_file_delta(run_dir / "stdout.txt", offset=stdout_offset, max_bytes=max_bytes)
+    stderr_delta = read_file_delta(run_dir / "stderr.txt", offset=stderr_offset, max_bytes=max_bytes)
+    events_delta = parse_events_delta(run_dir / "events.ndjson", offset=event_offset, max_bytes=max_bytes)
+    event_summary = summarize_events(events_delta["events"])
+    return {
+        "ok": True,
+        "run_id": run_id,
+        "status": status,
+        "stdout": stdout_delta,
+        "stderr": stderr_delta,
+        "events": {
+            "path": events_delta["path"],
+            "offset": events_delta["offset"],
+            "next_offset": events_delta["next_offset"],
+            "size": events_delta["size"],
+            "truncated": events_delta["truncated"],
+            "items": events_delta["events"],
+        },
+        "latest_phase": event_summary.get("latest_phase") or status.get("latest_phase"),
+        "tool_calls": event_summary.get("tool_calls") or status.get("tool_calls", []),
+    }
+
+
+def stop_run(run_id: str, force: bool = False, timeout_seconds: int = 5) -> dict[str, Any]:
+    run_dir = safe_run_dir(run_id)
+    status = single_run_status(run_id, include_output_tail=False)
+    if not status.get("active"):
+        final_status = status.get("status")
+        return {
+            "ok": True,
+            "run_id": run_id,
+            "previous_status": final_status,
+            "status": "already_stopped" if final_status == "stopped" else "already_finished",
+            "active": False,
+            "exit_code": status.get("exit_code"),
+        }
+    requested_at = utc_now_iso()
+    (run_dir / "stop-requested.json").write_text(json.dumps({"requested_at": requested_at, "force": force}, ensure_ascii=False), encoding="utf-8")
+    update_metadata(run_dir, status="stop_requested", stop_requested_at=requested_at)
+    append_event(run_dir, {"type": "stop_requested", "force": force})
+    results: list[dict[str, Any]] = []
+    child_pid = status.get("child_pid")
+    worker_pid = status.get("worker_pid")
+    if child_pid:
+        results.append(terminate_process_tree(int(child_pid), force=force, wait_seconds=timeout_seconds))
+    refreshed = single_run_status(run_id, include_output_tail=False)
+    if refreshed.get("active") and worker_pid:
+        results.append(terminate_process_tree(int(worker_pid), force=True if force else False, wait_seconds=timeout_seconds))
+    final = single_run_status(run_id, include_output_tail=False)
+    stopped = not final.get("active")
+    stopped_at = utc_now_iso()
+    if stopped:
+        update_metadata(run_dir, status="stopped", stopped_at=stopped_at, finished_at=stopped_at, exit_code=final.get("exit_code") if final.get("exit_code") is not None else -15)
+        append_event(run_dir, {"type": "stopped", "status": "stopped"})
+        final = single_run_status(run_id, include_output_tail=False)
+    return {
+        "ok": True,
+        "run_id": run_id,
+        "previous_status": status.get("status"),
+        "status": final.get("status"),
+        "active": final.get("active"),
+        "force": force,
+        "stopped": stopped,
+        "stop_results": results,
+    }
+
+
+def read_team_manifest(team_id: str) -> dict[str, Any]:
+    if not TEAM_ID_RE.match(team_id):
+        raise OrchestratorError(f"Invalid team id: {team_id}")
+    path = TEAMS_DIR / f"{team_id}.json"
+    if not path.exists():
+        raise OrchestratorError(f"Team manifest not found: {team_id}")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def write_team_manifest(team_id: str, data: dict[str, Any]) -> Path:
+    TEAMS_DIR.mkdir(parents=True, exist_ok=True)
+    path = TEAMS_DIR / f"{team_id}.json"
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def send_instruction(
+    run_id: str,
+    instruction: str,
+    force: bool = False,
+    role: str | None = None,
+    task_type: str | None = None,
+    timeout_seconds: int | None = None,
+) -> dict[str, Any]:
+    """Append instruction by stopping the run and restarting with recovered context."""
+    if not instruction.strip():
+        raise OrchestratorError("Instruction cannot be empty.")
+    previous = poll_run(run_id, max_bytes=50000, include_output_tail=True)
+    status = previous["status"]
+    if status.get("active"):
+        stop = stop_run(run_id, force=force, timeout_seconds=5)
+    else:
+        stop = {"ok": True, "status": "already_finished"}
+    metadata = read_metadata(safe_run_dir(run_id))
+    context = "\n".join(
+        [
+            f"Previous run id: {run_id}",
+            f"Previous status: {status.get('status')}",
+            "",
+            "Previous stdout tail:",
+            str(status.get("stdout_tail", ""))[-6000:],
+            "",
+            "Previous stderr tail:",
+            str(status.get("stderr_tail", ""))[-2000:],
+            "",
+            "New instruction:",
+            instruction.strip(),
+        ]
+    )
+    task = "Continue the previous Claude Code worker run using the new instruction. Preserve useful context, avoid repeating completed work, and report what changed."
+    new_run = run_streaming_agent(
+        task=task,
+        role=role or str(metadata.get("role") or "implementation"),
+        task_type=task_type or metadata.get("task_type"),
+        profile=(metadata.get("profile") or {}).get("name"),
+        allow_write=bool(metadata.get("allow_write", False)),
+        timeout_seconds=timeout_seconds or metadata.get("timeout_seconds"),
+        cwd=Path(str(metadata.get("cwd") or Path.cwd())),
+        context=context,
+    )
+    return {"ok": True, "old_run_id": run_id, "stop": stop, "new_run": new_run}
+
+
+def spawn_role_team(
+    task: str,
+    roles: list[str] | None = None,
+    cwd: Path | None = None,
+    context: str | None = None,
+    timeout_seconds: int | None = None,
+) -> dict[str, Any]:
+    if not task.strip():
+        raise OrchestratorError("Task cannot be empty.")
+    selected_roles = roles or ["requirements", "architecture", "security", "testing"]
+    if not selected_roles:
+        raise OrchestratorError("At least one role is required.")
+    team_id = "team-" + new_run_id()
+    runs: list[dict[str, Any]] = []
+    for role in selected_roles:
+        run = run_streaming_agent(
+            task=task,
+            role=role,
+            cwd=cwd,
+            context="\n".join(part for part in [f"Team id: {team_id}", context or ""] if part),
+            timeout_seconds=timeout_seconds,
+        )
+        runs.append({"role": role, "run_id": run["run_id"], "status": run["status"], "profile": run.get("profile")})
+    manifest = {
+        "team_id": team_id,
+        "created_at": utc_now_iso(),
+        "task": task,
+        "cwd": str(cwd or Path.cwd()),
+        "roles": selected_roles,
+        "runs": runs,
+    }
+    path = write_team_manifest(team_id, manifest)
+    return {"ok": True, "team_id": team_id, "manifest_path": str(path), "runs": runs}
+
+
+def resolve_team_run_ids(team_id: str | None = None, run_ids: list[str] | None = None) -> list[str]:
+    ids = list(run_ids or [])
+    if team_id:
+        manifest = read_team_manifest(team_id)
+        ids.extend(str(item["run_id"]) for item in manifest.get("runs", []) if item.get("run_id"))
+    if not ids:
+        raise OrchestratorError("Provide team_id or run_ids.")
+    seen: set[str] = set()
+    unique: list[str] = []
+    for run_id in ids:
+        safe_run_dir(run_id)
+        if run_id not in seen:
+            seen.add(run_id)
+            unique.append(run_id)
+    return unique
+
+
+def extract_signal_lines(text: str, limit: int = 60) -> list[str]:
+    lines: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip(" -*\t")
+        if len(line) < 8 or len(line) > 220:
+            continue
+        if any(token in line.lower() for token in ("error", "risk", "bug", "todo", "conflict", "agree", "recommend", "建议", "风险", "冲突", "一致", "结论")):
+            lines.append(line)
+        elif raw.lstrip().startswith(("-", "*", "1.", "2.", "3.")):
+            lines.append(line)
+        if len(lines) >= limit:
+            break
+    return lines
+
+
+def collect_team_results(team_id: str | None = None, run_ids: list[str] | None = None, tail_chars: int = 8000) -> dict[str, Any]:
+    ids = resolve_team_run_ids(team_id, run_ids)
+    items: list[dict[str, Any]] = []
+    line_counts: dict[str, int] = {}
+    conflict_lines: list[str] = []
+    for run_id in ids:
+        status = single_run_status(run_id, include_output_tail=True, tail_chars=tail_chars)
+        text = str(status.get("stdout_tail", ""))
+        signals = extract_signal_lines(text)
+        for line in signals:
+            key = re.sub(r"\s+", " ", line.lower())
+            line_counts[key] = line_counts.get(key, 0) + 1
+            if any(token in key for token in ("conflict", "risk", "blocked", "error", "冲突", "风险", "错误", "阻塞")):
+                conflict_lines.append(line)
+        items.append({"run_id": run_id, "role": status.get("role"), "status": status.get("status"), "active": status.get("active"), "signals": signals[:20]})
+    agreements = [line for line, count in line_counts.items() if count > 1][:20]
+    report_lines = ["# Team Results", ""]
+    if team_id:
+        report_lines.append(f"Team: `{team_id}`")
+        report_lines.append("")
+    report_lines.append("## Runs")
+    for item in items:
+        report_lines.append(f"- `{item['run_id']}` role `{item.get('role')}` status `{item.get('status')}` active `{item.get('active')}`")
+    report_lines.extend(["", "## Agreements"])
+    report_lines.extend(f"- {line}" for line in agreements) if agreements else report_lines.append("- No repeated agreement lines detected; controller review required.")
+    report_lines.extend(["", "## Conflicts / Risks"])
+    report_lines.extend(f"- {line}" for line in conflict_lines[:20]) if conflict_lines else report_lines.append("- No explicit conflict/risk markers detected.")
+    return {"ok": True, "team_id": team_id, "run_ids": ids, "items": items, "agreements": agreements, "conflicts": conflict_lines[:20], "report": "\n".join(report_lines)}
+
+
+def cross_review(
+    run_ids: list[str],
+    reviewer_roles: list[str] | None = None,
+    cwd: Path | None = None,
+    timeout_seconds: int | None = None,
+) -> dict[str, Any]:
+    ids = resolve_team_run_ids(run_ids=run_ids)
+    roles = reviewer_roles or ["security", "testing", "review"]
+    bundle_lines = ["Review these previous worker outputs. Focus on contradictions, missed risks, and acceptance blockers.", ""]
+    for run_id in ids:
+        status = single_run_status(run_id, include_output_tail=True, tail_chars=6000)
+        bundle_lines.extend([f"## Run {run_id} / role {status.get('role')} / status {status.get('status')}", str(status.get("stdout_tail", ""))[-6000:], ""])
+    task = "Cross-review prior Claude Code worker outputs and produce second-round findings ordered by severity."
+    spawned: list[dict[str, Any]] = []
+    for role in roles:
+        run = run_streaming_agent(task=task, role=role, cwd=cwd, context="\n".join(bundle_lines), timeout_seconds=timeout_seconds)
+        spawned.append({"reviewer_role": role, "run_id": run["run_id"], "status": run["status"], "profile": run.get("profile")})
+    return {"ok": True, "source_run_ids": ids, "review_runs": spawned}
+
+
+def preflight_write_scope(
+    cwd: Path | None = None,
+    allowed_paths: list[str] | None = None,
+    denied_paths: list[str] | None = None,
+    max_diff_lines: int = 800,
+) -> dict[str, Any]:
+    root = (cwd or Path.cwd()).resolve()
+    if not root.exists():
+        raise OrchestratorError(f"cwd does not exist: {root}")
+    def normalize(items: list[str] | None) -> list[str]:
+        result: list[str] = []
+        for item in items or []:
+            candidate = (root / item).resolve()
+            try:
+                candidate.relative_to(root)
+            except ValueError as exc:
+                raise OrchestratorError(f"Path is outside cwd: {item}") from exc
+            result.append(str(candidate))
+        return result
+    data = {
+        "created_at": utc_now_iso(),
+        "cwd": str(root),
+        "allowed_paths": normalize(allowed_paths),
+        "denied_paths": normalize(denied_paths),
+        "max_diff_lines": max_diff_lines,
+        "rules": [
+            "Claude Code may only edit allowed_paths.",
+            "Claude Code must never edit denied_paths.",
+            "Codex must review git diff before accepting changes.",
+        ],
+    }
+    scope_dir = root / ".claude-code-orchestrator"
+    scope_dir.mkdir(parents=True, exist_ok=True)
+    path = scope_dir / "write-scope.json"
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"ok": True, "path": str(path), "scope": data}
+
+
+def diff_summary(cwd: Path | None = None, limit_chars: int = 200000) -> dict[str, Any]:
+    diff = git_diff(cwd=cwd, limit_chars=limit_chars)
+    text = diff.get("diff", "")
+    files: dict[str, dict[str, Any]] = {}
+    current: str | None = None
+    for line in text.splitlines():
+        if line.startswith("diff --git "):
+            parts = line.split()
+            current = parts[-1][2:] if len(parts) >= 4 and parts[-1].startswith("b/") else parts[-1] if parts else None
+            if current:
+                files.setdefault(current, {"added": 0, "deleted": 0, "risk": []})
+        elif current and line.startswith("+") and not line.startswith("+++"):
+            files[current]["added"] += 1
+        elif current and line.startswith("-") and not line.startswith("---"):
+            files[current]["deleted"] += 1
+    risk_keywords = {
+        "package": "dependency/package metadata changed",
+        "lock": "lockfile changed",
+        "config": "configuration changed",
+        "auth": "auth-sensitive path",
+        "secret": "secret-sensitive path",
+        "server": "runtime server path",
+        "workflow": "CI workflow changed",
+    }
+    for file, info in files.items():
+        lower = file.lower()
+        for key, reason in risk_keywords.items():
+            if key in lower:
+                info["risk"].append(reason)
+    total_added = sum(item["added"] for item in files.values())
+    total_deleted = sum(item["deleted"] for item in files.values())
+    needs_tests = bool(files) and (total_added + total_deleted > 20 or any(item["risk"] for item in files.values()))
+    return {
+        "ok": diff.get("ok", False),
+        "cwd": diff.get("cwd"),
+        "file_count": len(files),
+        "total_added": total_added,
+        "total_deleted": total_deleted,
+        "files": files,
+        "risks": [f"{file}: {', '.join(info['risk'])}" for file, info in files.items() if info["risk"]],
+        "needs_tests": needs_tests,
+        "truncated": diff.get("truncated", False),
+    }
+
+
+def secret_scan_text(text: str, source: str) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        if SECRET_VALUE_RE.search(line) or (SECRET_KEY_RE.search(line) and "=" in line):
+            findings.append({"source": source, "line": lineno, "snippet": str(redact(line))[:500]})
+    return findings
+
+
+def secret_scan_run(run_id: str, include_diff: bool = True) -> dict[str, Any]:
+    run_dir = safe_run_dir(run_id)
+    metadata = read_metadata(run_dir)
+    findings: list[dict[str, Any]] = []
+    for name in ("stdout.txt", "stderr.txt", "events.ndjson"):
+        path = run_dir / name
+        if path.exists():
+            findings.extend(secret_scan_text(path.read_text(encoding="utf-8", errors="replace"), str(path)))
+    if include_diff:
+        cwd = Path(str(metadata.get("cwd") or Path.cwd()))
+        if (cwd / ".git").exists():
+            diff = git_diff(cwd=cwd, limit_chars=300000)
+            findings.extend(secret_scan_text(str(diff.get("diff", "")), f"git-diff:{cwd}"))
+    return {"ok": len(findings) == 0, "run_id": run_id, "finding_count": len(findings), "findings": findings[:100]}
+
+
+def rollback_run(run_id: str, confirm: bool = False) -> dict[str, Any]:
+    run_dir = safe_run_dir(run_id)
+    metadata = read_metadata(run_dir)
+    cwd = Path(str(metadata.get("cwd") or Path.cwd()))
+    before = metadata.get("git_before") or {}
+    after = metadata.get("git_after") or {}
+    before_diff = Path(before.get("diff_path", "")) if before.get("diff_path") else None
+    after_diff = Path(after.get("diff_path", "")) if after.get("diff_path") else None
+    if not before.get("is_git_repo") or not (cwd / ".git").exists():
+        return {"ok": False, "run_id": run_id, "error": "Rollback requires a git repository snapshot."}
+    if not before_diff or not before_diff.exists() or not after_diff or not after_diff.exists():
+        return {"ok": False, "run_id": run_id, "error": "Missing before/after git snapshots for this run."}
+    if before_diff.read_text(encoding="utf-8", errors="replace").strip():
+        return {
+            "ok": False,
+            "run_id": run_id,
+            "error": "Pre-run worktree was dirty. Automated rollback is refused to avoid reverting unrelated user changes.",
+            "before_diff_path": str(before_diff),
+            "after_diff_path": str(after_diff),
+        }
+    if not confirm:
+        return {
+            "ok": False,
+            "run_id": run_id,
+            "requires_confirm": True,
+            "message": "Pre-run diff was empty. Pass confirm=true to apply reverse patch for the post-run diff.",
+            "after_diff_path": str(after_diff),
+        }
+    backup_path = run_dir / f"rollback-backup-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.diff"
+    current = subprocess.run(["git", "diff", "--binary", "--", "."], cwd=str(cwd), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+    backup_path.write_text(str(redact(current.stdout or current.stderr or "")), encoding="utf-8")
+    proc = subprocess.run(["git", "apply", "-R", str(after_diff)], cwd=str(cwd), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+    return {
+        "ok": proc.returncode == 0,
+        "run_id": run_id,
+        "exit_code": proc.returncode,
+        "backup_path": str(backup_path),
+        "stdout": str(redact(proc.stdout or ""))[-2000:],
+        "stderr": str(redact(proc.stderr or ""))[-2000:],
+    }
+
+
+def load_cost_guard() -> dict[str, Any]:
+    if COST_GUARD_PATH.exists():
+        return json.loads(COST_GUARD_PATH.read_text(encoding="utf-8"))
+    return {"max_concurrent": 4, "max_timeout_seconds": 1800, "per_model": {}, "updated_at": None}
+
+
+def cost_guard(config: dict[str, Any] | None = None, apply: bool = False) -> dict[str, Any]:
+    current = load_cost_guard()
+    if config:
+        current.update(config)
+        current["updated_at"] = utc_now_iso()
+        if apply:
+            COST_GUARD_PATH.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"ok": True, "path": str(COST_GUARD_PATH), "applied": apply, "guard": current}
+
+
+def enforce_cost_guard(model: str | None, timeout_seconds: int) -> int:
+    guard = load_cost_guard()
+    active = run_status(include_finished=False).get("active_count", 0)
+    max_concurrent = int(guard.get("max_concurrent", 4))
+    if active >= max_concurrent:
+        raise OrchestratorError(f"Cost guard blocked run: active workers {active} >= max_concurrent {max_concurrent}.")
+    timeout = min(timeout_seconds, int(guard.get("max_timeout_seconds", timeout_seconds)))
+    if model:
+        per_model = guard.get("per_model", {}).get(model, {})
+        if per_model.get("max_timeout_seconds"):
+            timeout = min(timeout, int(per_model["max_timeout_seconds"]))
+    return timeout
+
+
+def benchmark_model(
+    profile: str | None = None,
+    role: str = "testing",
+    task: str = "Return a concise JSON object with keys ok and summary.",
+    timeout_seconds: int = 120,
+    execute: bool = False,
+) -> dict[str, Any]:
+    route = resolve_route(role=role, profile=profile)
+    provider = get_provider(route["profile"])
+    if not execute:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "message": "Pass execute=true to run a real benchmark task through Claude Code.",
+            "profile": provider.name,
+            "model": route.get("model_override") or provider.model,
+            "task": task,
+        }
+    started = time.time()
+    run = run_agent(task=task, role=role, profile=profile, timeout_seconds=timeout_seconds, output_format="json")
+    return {
+        "ok": run.get("exit_code") == 0,
+        "dry_run": False,
+        "profile": provider.name,
+        "model": route.get("model_override") or provider.model,
+        "duration_ms": int((time.time() - started) * 1000),
+        "run_id": run.get("run_id"),
+        "exit_code": run.get("exit_code"),
+        "stdout_tail": run.get("stdout_tail", "")[-2000:],
+    }
+
+
+def calibrate_policy(preferences: dict[str, Any], apply: bool = True) -> dict[str, Any]:
+    data = {
+        "updated_at": utc_now_iso(),
+        "preferences": preferences,
+        "notes": "Use this file to record local model preferences discovered from real workloads.",
+    }
+    if apply:
+        CALIBRATION_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"ok": True, "applied": apply, "path": str(CALIBRATION_PATH), "calibration": data}
+
+
+def dashboard(include_finished: bool = True, limit: int = 30, open_browser: bool = False) -> dict[str, Any]:
+    DASHBOARD_DIR.mkdir(parents=True, exist_ok=True)
+    data = run_status(include_finished=include_finished, include_output_tail=True, tail_chars=1000, limit=limit)
+    cards = []
+    for item in data.get("runs", []):
+        cards.append(
+            f"<section class='card'><h2>{item.get('role')} <code>{item.get('run_id')}</code></h2>"
+            f"<p>Status: <b>{item.get('status')}</b> Active: {item.get('active')} Elapsed: {item.get('elapsed_ms')} ms</p>"
+            f"<p>Model: {(item.get('profile') or {}).get('model')}</p>"
+            f"<pre>{str(item.get('last_stdout_line') or item.get('last_stderr_line') or '')}</pre></section>"
+        )
+    html = "\n".join(
+        [
+            "<!doctype html><html><head><meta charset='utf-8'><title>Claude Code Workers</title>",
+            "<style>body{font-family:system-ui;background:#0d1117;color:#e6edf3;margin:24px}.card{border:1px solid #30363d;border-radius:8px;padding:16px;margin:12px 0;background:#161b22}code{color:#7ee787}pre{white-space:pre-wrap;color:#a5d6ff}</style>",
+            "</head><body><h1>Claude Code Worker Dashboard</h1>",
+            f"<p>Generated at {utc_now_iso()}</p>",
+            "".join(cards) if cards else "<p>No runs found.</p>",
+            "</body></html>",
+        ]
+    )
+    path = DASHBOARD_DIR / "index.html"
+    path.write_text(html, encoding="utf-8")
+    if open_browser:
+        if os.name == "nt":
+            subprocess.Popen(["cmd", "/c", "start", "", str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            subprocess.Popen(["xdg-open", str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return {"ok": True, "path": str(path), "run_count": data.get("count", 0), "opened": open_browser}
+
+
+def open_run_folder(run_id: str, open_folder: bool = True) -> dict[str, Any]:
+    run_dir = safe_run_dir(run_id)
+    if not run_dir.exists():
+        raise OrchestratorError(f"Run not found: {run_id}")
+    if open_folder:
+        if os.name == "nt":
+            subprocess.Popen(["explorer", str(run_dir)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            subprocess.Popen(["xdg-open", str(run_dir)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return {"ok": True, "run_id": run_id, "path": str(run_dir), "opened": open_folder}
+
+
+def export_report(run_id: str | None = None, team_id: str | None = None, output_dir: Path | None = None) -> dict[str, Any]:
+    report_dir = output_dir or REPORTS_DIR
+    report_dir.mkdir(parents=True, exist_ok=True)
+    lines = ["# Claude Code Orchestrator Report", "", f"Generated: {utc_now_iso()}", ""]
+    if team_id:
+        collected = collect_team_results(team_id=team_id)
+        lines.extend([collected["report"], ""])
+        name = f"{team_id}.md"
+    elif run_id:
+        status = single_run_status(run_id, include_output_tail=True, tail_chars=10000)
+        scan = secret_scan_run(run_id, include_diff=False)
+        lines.extend(
+            [
+                f"Run: `{run_id}`",
+                "",
+                f"- Status: `{status.get('status')}`",
+                f"- Role: `{status.get('role')}`",
+                f"- Model: `{(status.get('profile') or {}).get('model')}`",
+                f"- Elapsed: `{status.get('elapsed_ms')}` ms",
+                f"- Secret scan findings: `{scan.get('finding_count')}`",
+                "",
+                "## Stdout Tail",
+                "```text",
+                str(status.get("stdout_tail", ""))[-10000:],
+                "```",
+                "",
+                "## Stderr Tail",
+                "```text",
+                str(status.get("stderr_tail", ""))[-4000:],
+                "```",
+            ]
+        )
+        name = f"run-{run_id}.md"
+    else:
+        raise OrchestratorError("Provide run_id or team_id.")
+    path = report_dir / name
+    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    return {"ok": True, "path": str(path), "run_id": run_id, "team_id": team_id}
 
 
 def run_visible_agent(
@@ -1167,6 +2372,31 @@ def print_json(data: Any) -> None:
         sys.stdout.buffer.write(text.encode("utf-8", errors="replace") + b"\n")
 
 
+def split_csv(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def parse_json_arg(value: str | None) -> dict[str, Any]:
+    if not value:
+        return {}
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise OrchestratorError(f"Invalid JSON argument: {exc}") from exc
+
+
+def parse_key_values(items: list[str] | None) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for item in items or []:
+        if "=" not in item:
+            raise OrchestratorError(f"Expected key=value, got: {item}")
+        key, value = item.split("=", 1)
+        result[key.strip()] = value.strip()
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Claude Code orchestrator backed by CCSwitch.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1185,6 +2415,95 @@ def main() -> int:
     run.add_argument("--allow-write", action="store_true")
     run.add_argument("--timeout-seconds", type=int)
     run.add_argument("--cwd")
+    stream = sub.add_parser("run-streaming")
+    stream.add_argument("task")
+    stream.add_argument("--role", default="implementation")
+    stream.add_argument("--task-type")
+    stream.add_argument("--profile")
+    stream.add_argument("--allow-write", action="store_true")
+    stream.add_argument("--timeout-seconds", type=int)
+    stream.add_argument("--cwd")
+    stream.add_argument("--context")
+    stream.add_argument("--no-include-partial-messages", action="store_true")
+    poll = sub.add_parser("poll-run")
+    poll.add_argument("--run-id", required=True)
+    poll.add_argument("--stdout-offset", type=int, default=0)
+    poll.add_argument("--stderr-offset", type=int, default=0)
+    poll.add_argument("--event-offset", type=int, default=0)
+    poll.add_argument("--max-bytes", type=int, default=20000)
+    poll.add_argument("--tail-chars", type=int, default=4000)
+    poll.add_argument("--no-output-tail", action="store_true")
+    stop = sub.add_parser("stop-run")
+    stop.add_argument("--run-id", required=True)
+    stop.add_argument("--force", action="store_true")
+    stop.add_argument("--timeout-seconds", type=int, default=5)
+    status = sub.add_parser("run-status")
+    status.add_argument("--run-id")
+    status.add_argument("--include-output", action="store_true")
+    status.add_argument("--include-finished", action="store_true")
+    status.add_argument("--tail-chars", type=int, default=4000)
+    status.add_argument("--limit", type=int, default=50)
+    send = sub.add_parser("send-instruction")
+    send.add_argument("--run-id", required=True)
+    send.add_argument("instruction")
+    send.add_argument("--force", action="store_true")
+    send.add_argument("--role")
+    send.add_argument("--task-type")
+    send.add_argument("--timeout-seconds", type=int)
+    team = sub.add_parser("spawn-role-team")
+    team.add_argument("task")
+    team.add_argument("--roles", default="requirements,architecture,security,testing")
+    team.add_argument("--cwd")
+    team.add_argument("--context")
+    team.add_argument("--timeout-seconds", type=int)
+    collect = sub.add_parser("collect-team-results")
+    collect.add_argument("--team-id")
+    collect.add_argument("--run-id", action="append", dest="run_ids")
+    collect.add_argument("--tail-chars", type=int, default=8000)
+    cross = sub.add_parser("cross-review")
+    cross.add_argument("--run-id", action="append", dest="run_ids", required=True)
+    cross.add_argument("--reviewer-roles", default="security,testing,review")
+    cross.add_argument("--cwd")
+    cross.add_argument("--timeout-seconds", type=int)
+    scope = sub.add_parser("preflight-write-scope")
+    scope.add_argument("--cwd")
+    scope.add_argument("--allow", action="append", dest="allowed_paths")
+    scope.add_argument("--deny", action="append", dest="denied_paths")
+    scope.add_argument("--max-diff-lines", type=int, default=800)
+    diff_summary_cmd = sub.add_parser("diff-summary")
+    diff_summary_cmd.add_argument("--cwd")
+    secret_scan = sub.add_parser("secret-scan-run")
+    secret_scan.add_argument("--run-id", required=True)
+    secret_scan.add_argument("--no-diff", action="store_true")
+    rollback = sub.add_parser("rollback-run")
+    rollback.add_argument("--run-id", required=True)
+    rollback.add_argument("--confirm", action="store_true")
+    bench = sub.add_parser("benchmark-model")
+    bench.add_argument("--profile")
+    bench.add_argument("--role", default="testing")
+    bench.add_argument("--task", default="Return a concise JSON object with keys ok and summary.")
+    bench.add_argument("--timeout-seconds", type=int, default=120)
+    bench.add_argument("--execute", action="store_true")
+    calibrate = sub.add_parser("calibrate-policy")
+    calibrate.add_argument("--preferences-json", default="{}")
+    calibrate.add_argument("--preference", action="append", dest="preferences")
+    calibrate.add_argument("--no-apply", action="store_true")
+    guard = sub.add_parser("cost-guard")
+    guard.add_argument("--config-json", default="{}")
+    guard.add_argument("--max-concurrent", type=int)
+    guard.add_argument("--max-timeout-seconds", type=int)
+    guard.add_argument("--apply", action="store_true")
+    dash = sub.add_parser("dashboard")
+    dash.add_argument("--include-finished", action="store_true")
+    dash.add_argument("--limit", type=int, default=30)
+    dash.add_argument("--open", action="store_true")
+    open_folder = sub.add_parser("open-run-folder")
+    open_folder.add_argument("--run-id", required=True)
+    open_folder.add_argument("--no-open", action="store_true")
+    export = sub.add_parser("export-report")
+    export.add_argument("--run-id")
+    export.add_argument("--team-id")
+    export.add_argument("--output-dir")
     visible = sub.add_parser("run-visible")
     visible.add_argument("task")
     visible.add_argument("--role", default="implementation")
@@ -1210,6 +2529,8 @@ def main() -> int:
     sub.add_parser("selftest")
     last = sub.add_parser("last-run")
     last.add_argument("--run-id")
+    worker = sub.add_parser("_stream-worker")
+    worker.add_argument("--run-id", required=True)
     args = parser.parse_args()
     try:
         if args.command == "healthcheck":
@@ -1232,6 +2553,118 @@ def main() -> int:
                     cwd=Path(args.cwd) if args.cwd else None,
                 )
             )
+        elif args.command == "run-streaming":
+            print_json(
+                run_streaming_agent(
+                    task=args.task,
+                    role=args.role,
+                    task_type=args.task_type,
+                    profile=args.profile,
+                    allow_write=args.allow_write,
+                    timeout_seconds=args.timeout_seconds,
+                    cwd=Path(args.cwd) if args.cwd else None,
+                    context=args.context,
+                    include_partial_messages=not args.no_include_partial_messages,
+                )
+            )
+        elif args.command == "poll-run":
+            print_json(
+                poll_run(
+                    run_id=args.run_id,
+                    stdout_offset=args.stdout_offset,
+                    stderr_offset=args.stderr_offset,
+                    event_offset=args.event_offset,
+                    max_bytes=args.max_bytes,
+                    include_output_tail=not args.no_output_tail,
+                    tail_chars=args.tail_chars,
+                )
+            )
+        elif args.command == "stop-run":
+            print_json(stop_run(run_id=args.run_id, force=args.force, timeout_seconds=args.timeout_seconds))
+        elif args.command == "run-status":
+            print_json(
+                run_status(
+                    run_id=args.run_id,
+                    include_output_tail=args.include_output,
+                    tail_chars=args.tail_chars,
+                    include_finished=args.include_finished,
+                    limit=args.limit,
+                )
+            )
+        elif args.command == "send-instruction":
+            print_json(
+                send_instruction(
+                    run_id=args.run_id,
+                    instruction=args.instruction,
+                    force=args.force,
+                    role=args.role,
+                    task_type=args.task_type,
+                    timeout_seconds=args.timeout_seconds,
+                )
+            )
+        elif args.command == "spawn-role-team":
+            print_json(
+                spawn_role_team(
+                    task=args.task,
+                    roles=split_csv(args.roles),
+                    cwd=Path(args.cwd) if args.cwd else None,
+                    context=args.context,
+                    timeout_seconds=args.timeout_seconds,
+                )
+            )
+        elif args.command == "collect-team-results":
+            print_json(collect_team_results(team_id=args.team_id, run_ids=args.run_ids, tail_chars=args.tail_chars))
+        elif args.command == "cross-review":
+            print_json(
+                cross_review(
+                    run_ids=args.run_ids,
+                    reviewer_roles=split_csv(args.reviewer_roles),
+                    cwd=Path(args.cwd) if args.cwd else None,
+                    timeout_seconds=args.timeout_seconds,
+                )
+            )
+        elif args.command == "preflight-write-scope":
+            print_json(
+                preflight_write_scope(
+                    cwd=Path(args.cwd) if args.cwd else None,
+                    allowed_paths=args.allowed_paths,
+                    denied_paths=args.denied_paths,
+                    max_diff_lines=args.max_diff_lines,
+                )
+            )
+        elif args.command == "diff-summary":
+            print_json(diff_summary(cwd=Path(args.cwd) if args.cwd else None))
+        elif args.command == "secret-scan-run":
+            print_json(secret_scan_run(args.run_id, include_diff=not args.no_diff))
+        elif args.command == "rollback-run":
+            print_json(rollback_run(args.run_id, confirm=args.confirm))
+        elif args.command == "benchmark-model":
+            print_json(
+                benchmark_model(
+                    profile=args.profile,
+                    role=args.role,
+                    task=args.task,
+                    timeout_seconds=args.timeout_seconds,
+                    execute=args.execute,
+                )
+            )
+        elif args.command == "calibrate-policy":
+            preferences = parse_json_arg(args.preferences_json)
+            preferences.update(parse_key_values(args.preferences))
+            print_json(calibrate_policy(preferences, apply=not args.no_apply))
+        elif args.command == "cost-guard":
+            guard_config = parse_json_arg(args.config_json)
+            if args.max_concurrent is not None:
+                guard_config["max_concurrent"] = args.max_concurrent
+            if args.max_timeout_seconds is not None:
+                guard_config["max_timeout_seconds"] = args.max_timeout_seconds
+            print_json(cost_guard(guard_config, apply=args.apply))
+        elif args.command == "dashboard":
+            print_json(dashboard(include_finished=args.include_finished, limit=args.limit, open_browser=args.open))
+        elif args.command == "open-run-folder":
+            print_json(open_run_folder(args.run_id, open_folder=not args.no_open))
+        elif args.command == "export-report":
+            print_json(export_report(run_id=args.run_id, team_id=args.team_id, output_dir=Path(args.output_dir) if args.output_dir else None))
         elif args.command == "run-visible":
             print_json(
                 run_visible_agent(
@@ -1267,6 +2700,8 @@ def main() -> int:
             print_json(selftest())
         elif args.command == "last-run":
             print_json(last_run(args.run_id))
+        elif args.command == "_stream-worker":
+            print_json(stream_worker(args.run_id))
         return 0
     except OrchestratorError as exc:
         print_json({"ok": False, "error": str(exc)})

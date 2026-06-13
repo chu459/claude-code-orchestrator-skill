@@ -268,6 +268,46 @@ python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" write-claude-md --cwd /path/to
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" run "Map this repository architecture" --role architecture
 ```
 
+跑一个实时可轮询的后台 Agent：
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" run-streaming "Review this repository" --role review
+```
+
+轮询、查看、停止后台 Agent：
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" poll-run --run-id <run_id>
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" run-status
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" stop-run --run-id <run_id> --force
+```
+
+启动和汇总角色团队：
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" spawn-role-team "Audit this repository" --roles requirements,architecture,security,testing
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" collect-team-results --team-id <team_id>
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" cross-review --run-id <run_id> --run-id <run_id>
+```
+
+写入前检查和验收：
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" preflight-write-scope --cwd /path/to/project --allow src --deny .env --max-diff-lines 800
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" diff-summary --cwd /path/to/project
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" secret-scan-run --run-id <run_id>
+```
+
+模型调度和报告：
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" benchmark-model --profile PROFILE --execute
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" calibrate-policy --preference coding=glm-5 --preference multimodal=qwen3.7-plus
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" cost-guard --max-concurrent 4 --max-timeout-seconds 1200 --apply
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" dashboard
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" export-report --run-id <run_id>
+```
+
 打开可视 Claude Code 窗口：
 
 ```bash
@@ -292,6 +332,24 @@ Codex 可以调用这些工具：
 | `cc_list_profiles` | 列出 CCSwitch profiles |
 | `cc_pick_profile` | 给某个角色选择模型 |
 | `cc_run_agent` | 跑一个 Claude Code 子 Agent |
+| `cc_run_streaming_agent` | 启动带 `stream-json` 事件的后台 Claude Code worker |
+| `cc_poll_run` | 查询某次 run 的状态、输出增量、工具调用、阶段和耗时 |
+| `cc_stop_run` | 停止指定 run id 的 Claude Code worker |
+| `cc_run_status` | 列出正在运行的 workers，或查看某个 run |
+| `cc_send_instruction` | 通过“停止并带上下文重启”追加指令 |
+| `cc_spawn_role_team` | 一次启动多个角色 worker |
+| `cc_collect_team_results` | 汇总团队输出，标出一致结论和冲突风险 |
+| `cc_cross_review` | 启动二轮交叉审查 worker |
+| `cc_preflight_write_scope` | 写代码前固定允许目录、禁止文件和最大 diff |
+| `cc_diff_summary` | 总结 diff 改了什么、风险在哪、是否需要测试 |
+| `cc_secret_scan_run` | 扫描 run 日志、事件和 diff，防止密钥泄漏 |
+| `cc_rollback_run` | 在 git 快照证明安全时保守回滚 |
+| `cc_benchmark_model` | 运行或规划小任务模型实测 |
+| `cc_calibrate_policy` | 固化本机模型偏好 |
+| `cc_cost_guard` | 配置最大并发和超时护栏 |
+| `cc_dashboard` | 生成本地 HTML worker 面板 |
+| `cc_open_run_folder` | 打开或返回某次 run 日志目录 |
+| `cc_export_report` | 导出 run 或 team 的 Markdown 报告 |
 | `cc_run_visible_agent` | 打开可视 Claude Code 窗口 |
 | `cc_last_run` | 查看最后一次运行 |
 | `cc_git_diff` | 查看子 Agent 修改后的 diff |
@@ -414,30 +472,33 @@ flowchart TD
 
 当前可用方法：
 
-1. 用 `run-visible` 打开 Claude Code 窗口。
-2. 用 `last-run` 看最新运行。
-3. 直接 tail run 文件。
+1. 用 `run-streaming` 启动后台 Claude Code worker。
+2. 用 `poll-run` 实时查看状态、输出增量、工具调用和阶段。
+3. 用 `run-status` 查看所有正在运行的 workers。
+4. 用 `stop-run` 停掉跑偏、卡住、成本异常的 worker。
+5. 用 `run-visible` 打开 Claude Code 窗口。
 
 Windows：
 
 ```powershell
 Get-Content "$env:CC_ORCHESTRATOR_HOME\runs\<run_id>\stdout.txt" -Wait
+Get-Content "$env:CC_ORCHESTRATOR_HOME\runs\<run_id>\events.ndjson" -Wait
 ```
 
 macOS / Linux：
 
 ```bash
 tail -f "$CC_ORCHESTRATOR_HOME/runs/<run_id>/stdout.txt"
+tail -f "$CC_ORCHESTRATOR_HOME/runs/<run_id>/events.ndjson"
 ```
 
-我认为最好的下一步是做一个事件流：
+P0 实时掌控四件套已经可用：
 
 ```text
-events.jsonl
-cc_watch_runs
+cc_run_streaming_agent
+cc_poll_run
+cc_stop_run
 cc_run_status
-terminal dashboard
-Codex live polling
 ```
 
 这样 Codex 可以实时看到：
@@ -478,13 +539,18 @@ docs/realtime-progress.md
 - [x] UTF-8 safe Windows output
 - [x] Run logs and `last-run`
 - [x] `CLAUDE.md` worker persona writer
-- [ ] Live event stream
-- [ ] Terminal dashboard
+- [x] Live event stream with `events.ndjson`
+- [x] Poll/stop/status tools for live control
+- [x] Role team spawning and result collection
+- [x] Cross-review worker loop
+- [x] Preflight write-scope file
+- [x] Diff summary and secret scan helpers
+- [x] Conservative rollback helper
+- [x] Model benchmark/calibration entrypoints
+- [x] Cost guard policy
+- [x] Local HTML dashboard
 - [ ] Web dashboard
-- [ ] Cost budget policy
-- [ ] Parallel run coordinator
 - [ ] Agent result voting
-- [ ] Automatic cross-review
 
 <h2 align="center">免责声明</h2>
 

@@ -14,16 +14,34 @@ from pydantic import BaseModel, ConfigDict, Field
 from cc_orchestrator import (
     ROLE_ORDER,
     OrchestratorError,
+    benchmark_model,
+    calibrate_policy,
+    collect_team_results,
+    cost_guard,
+    cross_review,
+    dashboard,
+    diff_summary,
+    export_report,
     healthcheck,
     git_diff,
     last_run,
     list_profiles,
+    open_run_folder,
     score_models,
     resolve_route,
     get_provider,
+    poll_run,
+    preflight_write_scope,
+    rollback_run,
     run_agent,
+    run_status,
+    run_streaming_agent,
     run_visible_agent,
     run_workflow_plan,
+    secret_scan_run,
+    send_instruction,
+    spawn_role_team,
+    stop_run,
     write_claude_md,
     write_reports,
 )
@@ -70,6 +88,155 @@ class RunAgentInput(BaseModel):
     timeout_seconds: Optional[int] = Field(default=None, ge=10, le=1800, description="Optional timeout override.")
     cwd: Optional[str] = Field(default=None, description="Working directory for Claude Code. Defaults to MCP server cwd.")
     context: Optional[str] = Field(default=None, max_length=20000, description="Additional context to append to the prompt.")
+
+
+class RunStreamingAgentInput(RunAgentInput):
+    include_partial_messages: bool = Field(default=True, description="Pass --include-partial-messages with stream-json output.")
+
+
+class PollRunInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    run_id: str = Field(..., description="Run id to poll.")
+    stdout_offset: int = Field(default=0, ge=0, description="Byte offset into stdout.txt.")
+    stderr_offset: int = Field(default=0, ge=0, description="Byte offset into stderr.txt.")
+    event_offset: int = Field(default=0, ge=0, description="Byte offset into events.ndjson.")
+    max_bytes: int = Field(default=20000, ge=1000, le=200000, description="Maximum bytes to read from each stream.")
+    include_output_tail: bool = Field(default=True, description="Include stdout/stderr tails in the status block.")
+    tail_chars: int = Field(default=4000, ge=0, le=20000, description="Tail characters for status output.")
+
+
+class StopRunInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    run_id: str = Field(..., description="Run id to stop. Required to avoid killing the wrong worker.")
+    force: bool = Field(default=False, description="Force kill the process tree when graceful termination is not enough.")
+    timeout_seconds: int = Field(default=5, ge=1, le=60, description="Grace seconds before reporting whether the worker is still alive.")
+
+
+class RunStatusInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    run_id: Optional[str] = Field(default=None, description="Optional run id. When omitted, returns active streaming workers.")
+    include_output_tail: bool = Field(default=False, description="Include stdout/stderr tails.")
+    include_finished: bool = Field(default=False, description="Include finished runs when listing all runs.")
+    tail_chars: int = Field(default=4000, ge=0, le=20000, description="Tail characters when include_output_tail is true.")
+    limit: int = Field(default=50, ge=1, le=500, description="Maximum runs returned when listing all runs.")
+
+
+class SendInstructionInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    run_id: str = Field(..., description="Existing run id.")
+    instruction: str = Field(..., min_length=1, max_length=12000, description="New instruction to apply by stop-and-restart.")
+    force: bool = Field(default=False, description="Force stop the old run if still active.")
+    role: Optional[str] = Field(default=None, description=ROLE_DESCRIPTION)
+    task_type: Optional[str] = Field(default=None, description=TASK_TYPE_DESCRIPTION)
+    timeout_seconds: Optional[int] = Field(default=None, ge=10, le=1800)
+
+
+class SpawnRoleTeamInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    task: str = Field(..., min_length=1, max_length=20000)
+    roles: list[str] = Field(default_factory=lambda: ["requirements", "architecture", "security", "testing"], description=ROLE_DESCRIPTION)
+    cwd: Optional[str] = None
+    context: Optional[str] = Field(default=None, max_length=20000)
+    timeout_seconds: Optional[int] = Field(default=None, ge=10, le=1800)
+
+
+class CollectTeamResultsInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    team_id: Optional[str] = None
+    run_ids: list[str] = Field(default_factory=list)
+    tail_chars: int = Field(default=8000, ge=1000, le=50000)
+
+
+class CrossReviewInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    run_ids: list[str] = Field(..., min_length=1)
+    reviewer_roles: list[str] = Field(default_factory=lambda: ["security", "testing", "review"], description=ROLE_DESCRIPTION)
+    cwd: Optional[str] = None
+    timeout_seconds: Optional[int] = Field(default=None, ge=10, le=1800)
+
+
+class PreflightWriteScopeInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    cwd: Optional[str] = None
+    allowed_paths: list[str] = Field(default_factory=list)
+    denied_paths: list[str] = Field(default_factory=list)
+    max_diff_lines: int = Field(default=800, ge=1, le=20000)
+
+
+class DiffSummaryInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    cwd: Optional[str] = None
+    limit_chars: int = Field(default=200000, ge=1000, le=1000000)
+
+
+class SecretScanRunInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    run_id: str
+    include_diff: bool = True
+
+
+class RollbackRunInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    run_id: str
+    confirm: bool = Field(default=False, description="Required for applying a reverse patch.")
+
+
+class BenchmarkModelInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    profile: Optional[str] = None
+    role: str = Field(default="testing", description=ROLE_DESCRIPTION)
+    task: str = Field(default="Return a concise JSON object with keys ok and summary.", max_length=20000)
+    timeout_seconds: int = Field(default=120, ge=10, le=1800)
+    execute: bool = Field(default=False, description="When false, returns the planned benchmark without spending model calls.")
+
+
+class CalibratePolicyInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    preferences: dict = Field(default_factory=dict)
+    apply: bool = True
+
+
+class CostGuardInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    config: dict = Field(default_factory=dict)
+    apply: bool = False
+
+
+class DashboardInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    include_finished: bool = True
+    limit: int = Field(default=30, ge=1, le=500)
+    open_browser: bool = False
+
+
+class OpenRunFolderInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    run_id: str
+    open_folder: bool = True
+
+
+class ExportReportInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    run_id: Optional[str] = None
+    team_id: Optional[str] = None
+    output_dir: Optional[str] = None
 
 
 class LastRunInput(BaseModel):
@@ -263,6 +430,238 @@ async def cc_run_agent(params: RunAgentInput) -> str:
         )
         return _json(data)
     except OrchestratorError as exc:
+        return _error(exc)
+
+
+@mcp.tool(
+    name="cc_run_streaming_agent",
+    annotations={
+        "title": "Run Streaming Claude Code Agent",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    },
+)
+async def cc_run_streaming_agent(params: RunStreamingAgentInput) -> str:
+    """Start Claude Code in the background with stream-json output.
+
+    This uses `claude -p --output-format stream-json --include-partial-messages`,
+    writes stdout/stderr plus `events.ndjson` under runs/<run_id>/, and returns
+    immediately so Codex can poll or stop the worker.
+    """
+    try:
+        data = run_streaming_agent(
+            task=params.task,
+            role=params.role,
+            task_type=params.task_type,
+            profile=params.profile,
+            allow_write=params.allow_write,
+            timeout_seconds=params.timeout_seconds,
+            cwd=Path(params.cwd) if params.cwd else None,
+            context=params.context,
+            include_partial_messages=params.include_partial_messages,
+        )
+        return _json(data)
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(
+    name="cc_poll_run",
+    annotations={
+        "title": "Poll Streaming Claude Code Run",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+async def cc_poll_run(params: PollRunInput) -> str:
+    """Poll a streaming run for status, event deltas, recent output, phase, and tool calls."""
+    try:
+        return _json(
+            poll_run(
+                run_id=params.run_id,
+                stdout_offset=params.stdout_offset,
+                stderr_offset=params.stderr_offset,
+                event_offset=params.event_offset,
+                max_bytes=params.max_bytes,
+                include_output_tail=params.include_output_tail,
+                tail_chars=params.tail_chars,
+            )
+        )
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(
+    name="cc_stop_run",
+    annotations={
+        "title": "Stop Streaming Claude Code Run",
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    },
+)
+async def cc_stop_run(params: StopRunInput) -> str:
+    """Stop a running Claude Code worker by run id."""
+    try:
+        return _json(stop_run(run_id=params.run_id, force=params.force, timeout_seconds=params.timeout_seconds))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(
+    name="cc_run_status",
+    annotations={
+        "title": "List Streaming Claude Code Runs",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+async def cc_run_status(params: RunStatusInput) -> str:
+    """Return one run's status or list all active Claude Code workers."""
+    try:
+        return _json(
+            run_status(
+                run_id=params.run_id,
+                include_output_tail=params.include_output_tail,
+                tail_chars=params.tail_chars,
+                include_finished=params.include_finished,
+                limit=params.limit,
+            )
+        )
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_send_instruction", annotations={"title": "Send Instruction By Restarting Run", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True})
+async def cc_send_instruction(params: SendInstructionInput) -> str:
+    """Append an instruction by stopping a non-interactive run and restarting with recovered context."""
+    try:
+        return _json(send_instruction(params.run_id, params.instruction, force=params.force, role=params.role, task_type=params.task_type, timeout_seconds=params.timeout_seconds))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_spawn_role_team", annotations={"title": "Spawn Role Team", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True})
+async def cc_spawn_role_team(params: SpawnRoleTeamInput) -> str:
+    """Start several role-specific streaming Claude Code workers and write a team manifest."""
+    try:
+        return _json(spawn_role_team(params.task, roles=params.roles, cwd=Path(params.cwd) if params.cwd else None, context=params.context, timeout_seconds=params.timeout_seconds))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_collect_team_results", annotations={"title": "Collect Team Results", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
+async def cc_collect_team_results(params: CollectTeamResultsInput) -> str:
+    """Summarize worker outputs and mark repeated agreements plus explicit conflicts/risks."""
+    try:
+        return _json(collect_team_results(team_id=params.team_id, run_ids=params.run_ids, tail_chars=params.tail_chars))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_cross_review", annotations={"title": "Cross Review Worker Outputs", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True})
+async def cc_cross_review(params: CrossReviewInput) -> str:
+    """Launch second-round reviewer workers over previous worker outputs."""
+    try:
+        return _json(cross_review(params.run_ids, reviewer_roles=params.reviewer_roles, cwd=Path(params.cwd) if params.cwd else None, timeout_seconds=params.timeout_seconds))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_preflight_write_scope", annotations={"title": "Preflight Write Scope", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False})
+async def cc_preflight_write_scope(params: PreflightWriteScopeInput) -> str:
+    """Write a project-local scope file that fixes allowed paths, denied paths, and max diff size."""
+    try:
+        return _json(preflight_write_scope(cwd=Path(params.cwd) if params.cwd else None, allowed_paths=params.allowed_paths, denied_paths=params.denied_paths, max_diff_lines=params.max_diff_lines))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_diff_summary", annotations={"title": "Summarize Git Diff", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
+async def cc_diff_summary(params: DiffSummaryInput) -> str:
+    """Return a structured summary of changed files, risk markers, and whether tests are recommended."""
+    try:
+        return _json(diff_summary(cwd=Path(params.cwd) if params.cwd else None, limit_chars=params.limit_chars))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_secret_scan_run", annotations={"title": "Scan Run For Secrets", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
+async def cc_secret_scan_run(params: SecretScanRunInput) -> str:
+    """Scan stdout, stderr, events, and optionally diff for leaked credentials."""
+    try:
+        return _json(secret_scan_run(params.run_id, include_diff=params.include_diff))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_rollback_run", annotations={"title": "Rollback Run", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False})
+async def cc_rollback_run(params: RollbackRunInput) -> str:
+    """Conservatively rollback a run when the pre-run git diff was empty and confirm=true."""
+    try:
+        return _json(rollback_run(params.run_id, confirm=params.confirm))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_benchmark_model", annotations={"title": "Benchmark CCSwitch Model", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True})
+async def cc_benchmark_model(params: BenchmarkModelInput) -> str:
+    """Run or plan a small real benchmark through Claude Code for a selected profile/model."""
+    try:
+        return _json(benchmark_model(profile=params.profile, role=params.role, task=params.task, timeout_seconds=params.timeout_seconds, execute=params.execute))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_calibrate_policy", annotations={"title": "Calibrate Model Policy", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False})
+async def cc_calibrate_policy(params: CalibratePolicyInput) -> str:
+    """Persist local model preference notes, such as strongest coding or multimodal model."""
+    try:
+        return _json(calibrate_policy(params.preferences, apply=params.apply))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_cost_guard", annotations={"title": "Configure Cost Guard", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False})
+async def cc_cost_guard(params: CostGuardInput) -> str:
+    """Read or write concurrency and timeout guardrails for worker runs."""
+    try:
+        return _json(cost_guard(params.config, apply=params.apply))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_dashboard", annotations={"title": "Generate Worker Dashboard", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False})
+async def cc_dashboard(params: DashboardInput) -> str:
+    """Generate a local HTML dashboard for recent Claude Code workers."""
+    try:
+        return _json(dashboard(include_finished=params.include_finished, limit=params.limit, open_browser=params.open_browser))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_open_run_folder", annotations={"title": "Open Run Folder", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False})
+async def cc_open_run_folder(params: OpenRunFolderInput) -> str:
+    """Open or return a run log directory."""
+    try:
+        return _json(open_run_folder(params.run_id, open_folder=params.open_folder))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_export_report", annotations={"title": "Export Run Or Team Report", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False})
+async def cc_export_report(params: ExportReportInput) -> str:
+    """Export a run or team workflow as a Markdown report."""
+    try:
+        return _json(export_report(run_id=params.run_id, team_id=params.team_id, output_dir=Path(params.output_dir) if params.output_dir else None))
+    except Exception as exc:
         return _error(exc)
 
 

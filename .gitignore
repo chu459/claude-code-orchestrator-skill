@@ -1,5 +1,6 @@
 runs/
 reports/
+dashboard/
 __pycache__/
 *.pyc
 *.pyo
