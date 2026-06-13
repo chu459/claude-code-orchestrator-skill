@@ -54,6 +54,8 @@ CONFIG_DIR = ROOT / "config"
 RUNS_DIR = ROOT / "runs"
 POLICY_PATH = CONFIG_DIR / "model_policy.json"
 AGENTS_PATH = CONFIG_DIR / "agents.json"
+CLAUDE_MD_MARKER_BEGIN = "<!-- claude-code-orchestrator:begin -->"
+CLAUDE_MD_MARKER_END = "<!-- claude-code-orchestrator:end -->"
 SECRET_KEY_RE = re.compile(r"(key|token|secret|authorization|auth)", re.IGNORECASE)
 SECRET_VALUE_RE = re.compile(r"(sk-[A-Za-z0-9_\-]{8,}|[A-Za-z0-9]{20,}\.[A-Za-z0-9_\-]{8,})")
 MODEL_ENV_KEYS = (
@@ -870,14 +872,132 @@ def write_reports(output_dir: Path | None = None) -> dict[str, Any]:
     return {"ok": True, "scores_path": str(scores_path), "strategy_path": str(strategy_path), "workflow_plan": plan}
 
 
+def build_claude_md(role: str = "implementation", project_name: str | None = None) -> str:
+    agents = load_json(AGENTS_PATH)
+    agent = agents.get(role) or agents.get("implementation", {})
+    role_prompt = agent.get("prompt", "")
+    role_description = agent.get("description", "Claude Code worker controlled by Codex.")
+    title = project_name or "this repository"
+    return "\n".join(
+        [
+            CLAUDE_MD_MARKER_BEGIN,
+            "# CLAUDE.md",
+            "",
+            "You are a Claude Code worker inside a Codex-controlled multi-agent workflow.",
+            "",
+            f"Project: {title}",
+            f"Assigned role: {role}",
+            f"Role purpose: {role_description}",
+            "",
+            "## Control Model",
+            "",
+            "- Codex is the controller, planner, reviewer, and final decision maker.",
+            "- Claude Code is an external worker process launched by Claude Code Orchestrator.",
+            "- Do not treat your own output as final until Codex reviews it.",
+            "- Keep work scoped to the user request and the current repository.",
+            "",
+            "## Role Instruction",
+            "",
+            role_prompt or "Follow the assigned role and keep output concise, safe, and verifiable.",
+            "",
+            "## Safety Rules",
+            "",
+            "- Do not print secrets, API keys, cookies, tokens, or hidden config values.",
+            "- Do not run destructive commands unless the user explicitly requested them.",
+            "- Do not revert unrelated user changes.",
+            "- Prefer read-only analysis unless write access is explicitly granted.",
+            "- When editing, list changed files and verification results.",
+            "- If blocked, report the blocker, the evidence, and the smallest next action.",
+            "",
+            "## Progress Reporting",
+            "",
+            "- State the current phase before long work.",
+            "- Prefer short, structured summaries.",
+            "- Mention tests or checks actually run.",
+            "- Save important reasoning in the final response, not in hidden state.",
+            CLAUDE_MD_MARKER_END,
+            "",
+        ]
+    )
+
+
+def write_claude_md(
+    cwd: Path | None = None,
+    role: str = "implementation",
+    project_name: str | None = None,
+    append: bool = False,
+    force: bool = False,
+) -> dict[str, Any]:
+    effective_cwd = (cwd or Path.cwd()).resolve()
+    effective_cwd.mkdir(parents=True, exist_ok=True)
+    path = effective_cwd / "CLAUDE.md"
+    content = build_claude_md(role=role, project_name=project_name or effective_cwd.name)
+    backup_path: Path | None = None
+
+    if path.exists():
+        current = path.read_text(encoding="utf-8", errors="replace")
+        if CLAUDE_MD_MARKER_BEGIN in current and CLAUDE_MD_MARKER_END in current:
+            updated = re.sub(
+                re.escape(CLAUDE_MD_MARKER_BEGIN) + r".*?" + re.escape(CLAUDE_MD_MARKER_END) + r"\n?",
+                content,
+                current,
+                flags=re.DOTALL,
+            )
+            path.write_text(updated, encoding="utf-8")
+            return {
+                "ok": True,
+                "path": str(path),
+                "mode": "updated-managed-section",
+                "backup_path": None,
+                "role": role,
+            }
+        if append:
+            path.write_text(current.rstrip() + "\n\n" + content, encoding="utf-8")
+            return {
+                "ok": True,
+                "path": str(path),
+                "mode": "appended-managed-section",
+                "backup_path": None,
+                "role": role,
+            }
+        if force:
+            backup_path = path.with_name(f"CLAUDE.md.backup.{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}")
+            backup_path.write_text(current, encoding="utf-8")
+            path.write_text(content, encoding="utf-8")
+            return {
+                "ok": True,
+                "path": str(path),
+                "mode": "replaced-with-backup",
+                "backup_path": str(backup_path),
+                "role": role,
+            }
+        return {
+            "ok": False,
+            "path": str(path),
+            "error": "CLAUDE.md already exists. Use append=true to add a managed section or force=true to replace with a backup.",
+            "role": role,
+        }
+
+    path.write_text(content, encoding="utf-8")
+    return {
+        "ok": True,
+        "path": str(path),
+        "mode": "created",
+        "backup_path": None,
+        "role": role,
+    }
+
+
 def selftest() -> dict[str, Any]:
     env = force_utf8_env({})
     decoded = subprocess_text("中文✅".encode("utf-8"))
+    claude_md = build_claude_md("review", "selftest")
     checks = {
         "utf8_env": env.get("PYTHONIOENCODING") == "utf-8" and env.get("PYTHONUTF8") == "1",
         "timeout_bytes_decode": decoded == "中文✅",
         "policy_exists": POLICY_PATH.exists(),
         "agents_exists": AGENTS_PATH.exists(),
+        "claude_md_template": "Assigned role: review" in claude_md and CLAUDE_MD_MARKER_BEGIN in claude_md,
     }
     return {
         "ok": all(checks.values()),
@@ -946,6 +1066,12 @@ def main() -> int:
     sub.add_parser("write-auto-policy")
     reports = sub.add_parser("write-reports")
     reports.add_argument("--output-dir")
+    claude_md = sub.add_parser("write-claude-md")
+    claude_md.add_argument("--cwd")
+    claude_md.add_argument("--role", default="implementation")
+    claude_md.add_argument("--project-name")
+    claude_md.add_argument("--append", action="store_true")
+    claude_md.add_argument("--force", action="store_true")
     sub.add_parser("selftest")
     last = sub.add_parser("last-run")
     last.add_argument("--run-id")
@@ -992,6 +1118,16 @@ def main() -> int:
             print_json(write_auto_policy())
         elif args.command == "write-reports":
             print_json(write_reports(output_dir=Path(args.output_dir) if args.output_dir else None))
+        elif args.command == "write-claude-md":
+            print_json(
+                write_claude_md(
+                    cwd=Path(args.cwd) if args.cwd else None,
+                    role=args.role,
+                    project_name=args.project_name,
+                    append=args.append,
+                    force=args.force,
+                )
+            )
         elif args.command == "selftest":
             print_json(selftest())
         elif args.command == "last-run":

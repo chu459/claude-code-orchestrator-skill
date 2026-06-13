@@ -65,6 +65,14 @@ Generate score and strategy reports:
 python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" write-reports
 ```
 
+Create or update a project `CLAUDE.md` for Claude Code sub-agents:
+
+```powershell
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" write-claude-md --cwd "PROJECT_PATH" --role implementation
+```
+
+If a project already has `CLAUDE.md`, preserve it by default. Use `--append` to add the managed orchestrator section, or `--force` to replace after writing a timestamped backup.
+
 Pick a route without running Claude Code:
 
 ```powershell
@@ -110,6 +118,7 @@ python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" diff --cwd "PROJECT_PATH"
 - If the user wants to watch Claude Code work, use `run-visible`.
 - Windows Chinese output is handled with UTF-8 stdio and child-process UTF-8 env. If a host still renders text strangely, rely on the UTF-8 files under `runs/<run_id>/`.
 - Timeout output is preserved when the subprocess exposes partial stdout/stderr; use `last-run` to recover the tails.
+- When Claude Code needs a stable persona, project rules, or role-specific worker behavior, write `CLAUDE.md` first with `write-claude-md` or MCP tool `cc_write_claude_md`, then run the sub-agent from that project cwd.
 
 ## Four-Phase Workflow
 

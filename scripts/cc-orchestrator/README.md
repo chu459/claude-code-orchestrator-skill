@@ -14,6 +14,7 @@ The server discovers CCSwitch from environment variables and the current user ho
 - `cc_last_run` returns the latest run metadata and tail output.
 - `cc_git_diff` returns a capped `git diff` for post-run review.
 - `cc_workflow_plan` returns the configured four-phase multi-agent role/model plan.
+- `cc_write_claude_md` writes a project `CLAUDE.md` persona/instructions file for Claude Code workers.
 - `cc_score_models` scores local CCSwitch models with local heuristics.
 - `cc_write_strategy_reports` writes model score and routing reports.
 
@@ -52,6 +53,7 @@ python tools\cc-orchestrator\cc_orchestrator.py list-profiles
 python tools\cc-orchestrator\cc_orchestrator.py score-models
 python tools\cc-orchestrator\cc_orchestrator.py write-auto-policy
 python tools\cc-orchestrator\cc_orchestrator.py write-reports
+python tools\cc-orchestrator\cc_orchestrator.py write-claude-md --cwd . --role implementation
 python tools\cc-orchestrator\cc_orchestrator.py pick --role implementation --task-type complex_code
 python tools\cc-orchestrator\cc_orchestrator.py workflow-plan "Fix the bug"
 python tools\cc-orchestrator\cc_orchestrator.py run-visible "Inspect this project" --role architecture

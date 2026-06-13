@@ -32,7 +32,7 @@
 ---
 
 
-## 中文版
+<h2 align="center">中文版</h2>
 
 众所周知，GPT / GPT Plus 很好用。
 
@@ -77,7 +77,7 @@ Skill = Codex 的操作说明书
 
 > 用最少的高端模型额度，撬动最多的工程产出。
 
-### 它到底是什么
+<h2 align="center">它到底是什么</h2>
 
 `claude-code-orchestrator-skill` 是一个 Codex Skill，里面自带一套 MCP Server 和 CLI。
 
@@ -94,8 +94,9 @@ Skill = Codex 的操作说明书
 - 支持 MCP 工具调用。
 - 支持可视 Claude Code 窗口。
 - 支持中文、Windows、UTF-8 输出。
+- 支持给项目写 `CLAUDE.md`，让 Claude Code 子 agent 有稳定人设和角色规则。
 
-### 前置条件
+<h2 align="center">前置条件</h2>
 
 必须先准备好这些东西：
 
@@ -127,7 +128,7 @@ CCSwitch 里有多个模型
 Claude Code 能走 CCSwitch 的 provider
 ```
 
-### 一句话让 Agent 安装
+<h2 align="center">一句话让 Agent 安装</h2>
 
 把这句话丢给 Codex：
 
@@ -141,7 +142,7 @@ English version:
 Install the Codex Skill and MCP server from https://github.com/chu459/claude-code-orchestrator-skill. Put the Skill at ~/.codex/skills/claude-code-orchestrator, wire the bundled MCP server into Codex config.toml, run selftest, healthcheck, score-models, and show me the selected multi-agent routing plan. Do not print secrets.
 ```
 
-### 一行命令安装
+<h2 align="center">一行命令安装</h2>
 
 Windows PowerShell：
 
@@ -163,7 +164,7 @@ unzip -q "$tmp/skill.zip" -d "$tmp" && \
 bash "$tmp"/claude-code-orchestrator-skill-main/install/install.sh
 ```
 
-### 手动安装
+<h2 align="center">手动安装</h2>
 
 ```bash
 git clone https://github.com/chu459/claude-code-orchestrator-skill.git
@@ -188,7 +189,7 @@ bash install/install.sh
 ~/.codex/skills/claude-code-orchestrator
 ```
 
-### 配置 MCP
+<h2 align="center">配置 MCP</h2>
 
 把下面内容加到 Codex 的 `config.toml`：
 
@@ -211,7 +212,7 @@ PYTHONUTF8 = "1"
 docs/mcp.codex.example.toml
 ```
 
-### 快速自检
+<h2 align="center">快速自检</h2>
 
 ```powershell
 $env:CC_ORCHESTRATOR_HOME = "$env:USERPROFILE\.codex\skills\claude-code-orchestrator\scripts\cc-orchestrator"
@@ -229,7 +230,7 @@ python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" workflow-plan "Refactor th
 - 能列出 CCSwitch 里的模型
 - 能生成多 Agent 路由计划
 
-### 常用命令
+<h2 align="center">常用命令</h2>
 
 健康检查：
 
@@ -255,6 +256,12 @@ python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" score-models
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" write-reports
 ```
 
+给项目写 Claude Code 子 agent 人设文档：
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" write-claude-md --cwd /path/to/project --role implementation
+```
+
 跑一个只读 Agent：
 
 ```bash
@@ -273,7 +280,7 @@ python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" run-visible "Inspect this repo
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" last-run
 ```
 
-### MCP 工具
+<h2 align="center">MCP 工具</h2>
 
 这套 Skill 自带 MCP Server。
 
@@ -289,10 +296,55 @@ Codex 可以调用这些工具：
 | `cc_last_run` | 查看最后一次运行 |
 | `cc_git_diff` | 查看子 Agent 修改后的 diff |
 | `cc_workflow_plan` | 生成多 Agent 工作流 |
+| `cc_write_claude_md` | 给项目写 Claude Code 子 agent 的 `CLAUDE.md` 人设文档 |
 | `cc_score_models` | 给本机模型打分 |
 | `cc_write_strategy_reports` | 写出模型评分和调度报告 |
 
-### 多 Agent 角色
+<h2 align="center">给 Claude Code 子 Agent 配置 CLAUDE.md</h2>
+
+Claude Code 可以读取项目里的 `CLAUDE.md`。
+
+这件事对多 agent 调度很重要。
+
+因为 Codex 可以先给 Claude Code 写好人设、边界和角色规则，再让它作为外部子 agent 去干活。
+
+生成的 `CLAUDE.md` 会告诉 Claude Code：
+
+- Codex 是总控、规划者、审查者和最终决策者。
+- Claude Code 是外部 worker。
+- 当前角色是什么，比如 `architecture`、`implementation`、`review`。
+- 不要泄露密钥，不要乱跑破坏性命令，不要回滚无关改动。
+- 长任务要报告阶段和验证结果。
+
+创建一个：
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" write-claude-md --cwd /path/to/project --role review
+```
+
+如果项目里已经有 `CLAUDE.md`，默认不会覆盖：
+
+- 默认：不覆盖。
+- `--append`：追加一段 orchestrator 托管内容。
+- `--force`：先备份，再替换。
+
+通过 MCP，Codex 可以调用：
+
+```text
+cc_write_claude_md
+```
+
+推荐流程：
+
+```text
+1. Codex 先规划任务
+2. Codex 给对应角色写 CLAUDE.md
+3. Codex 通过这个 Skill 启动 Claude Code
+4. Claude Code 按项目人设和角色规则执行
+5. Codex 审查日志、diff 和最终输出
+```
+
+<h2 align="center">多 Agent 角色</h2>
 
 默认角色：
 
@@ -306,7 +358,7 @@ Codex 可以调用这些工具：
 | `review` | 代码审查、问题排序 |
 | `ops` | 部署、日志、回滚、运行风险 |
 
-### 成本管理学：大脑和手
+<h2 align="center">成本管理学：大脑和手</h2>
 
 这套 Skill 的核心不是“多开几个 Agent”。
 
@@ -325,7 +377,7 @@ Codex 可以调用这些工具：
 
 而是把每个模型放到它最划算的位置。
 
-### 架构图
+<h2 align="center">架构图</h2>
 
 ```mermaid
 flowchart TD
@@ -337,12 +389,14 @@ flowchart TD
   CLI --> Router
   Router --> CCSwitch["CCSwitch Profiles"]
   CCSwitch --> Models["Qwen / GLM / Claude-compatible Models"]
-  Router --> ClaudeCode["Claude Code Worker Process"]
+  Router --> ClaudeMD["Project CLAUDE.md"]
+  ClaudeMD --> ClaudeCode["Claude Code Worker Process"]
+  Router --> ClaudeCode
   ClaudeCode --> Runs["runs/<run_id> logs"]
   Runs --> Codex
 ```
 
-### 安全默认值
+<h2 align="center">安全默认值</h2>
 
 默认非常保守：
 
@@ -354,8 +408,9 @@ flowchart TD
 - 日志里会做密钥脱敏。
 - Windows 中文输出强制 UTF-8。
 - 超时后尽量保留部分 stdout/stderr。
+- 已有 `CLAUDE.md` 默认不覆盖，除非显式使用 `--append` 或 `--force`。
 
-### 实时进度怎么看
+<h2 align="center">实时进度怎么看</h2>
 
 当前可用方法：
 
@@ -401,7 +456,7 @@ Codex live polling
 docs/realtime-progress.md
 ```
 
-### 开源定位
+<h2 align="center">开源定位</h2>
 
 这套项目的目标很夸张：
 
@@ -411,7 +466,7 @@ docs/realtime-progress.md
 
 它是为了把真实工程里的模型成本、上下文成本、人工注意力成本，全都纳入调度。
 
-### Roadmap
+<h2 align="center">Roadmap</h2>
 
 - [x] Codex Skill
 - [x] Bundled MCP Server
@@ -422,6 +477,7 @@ docs/realtime-progress.md
 - [x] Visible Claude Code window
 - [x] UTF-8 safe Windows output
 - [x] Run logs and `last-run`
+- [x] `CLAUDE.md` worker persona writer
 - [ ] Live event stream
 - [ ] Terminal dashboard
 - [ ] Web dashboard
@@ -430,7 +486,7 @@ docs/realtime-progress.md
 - [ ] Agent result voting
 - [ ] Automatic cross-review
 
-### 免责声明
+<h2 align="center">免责声明</h2>
 
 This project is not affiliated with OpenAI, Anthropic, Claude, Claude Code, or CCSwitch.
 

@@ -23,6 +23,7 @@ from cc_orchestrator import (
     run_agent,
     run_visible_agent,
     run_workflow_plan,
+    write_claude_md,
     write_reports,
 )
 
@@ -91,6 +92,16 @@ class ReportInput(BaseModel):
 
     output_dir: Optional[str] = Field(default=None, description="Optional report output directory. Defaults to reports/ under the orchestrator.")
     response_format: ResponseFormat = Field(default=ResponseFormat.JSON, description="Return JSON or markdown.")
+
+
+class ClaudeMdInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    cwd: Optional[str] = Field(default=None, description="Project directory where CLAUDE.md should be written. Defaults to MCP server cwd.")
+    role: str = Field(default="implementation", description="Agent role to embed into CLAUDE.md.")
+    project_name: Optional[str] = Field(default=None, description="Optional human-readable project name.")
+    append: bool = Field(default=False, description="Append a managed section if CLAUDE.md already exists.")
+    force: bool = Field(default=False, description="Replace CLAUDE.md after writing a timestamped backup.")
 
 
 def _json(data: object) -> str:
@@ -277,8 +288,6 @@ async def cc_run_visible_agent(params: RunAgentInput) -> str:
         return _json(data)
     except Exception as exc:
         return _error(exc)
-    except Exception as exc:
-        return _error(exc)
 
 
 @mcp.tool(
@@ -355,6 +364,37 @@ async def cc_workflow_plan(params: WorkflowPlanInput) -> str:
     """Return the configured role/model/permission plan for the four-phase workflow."""
     try:
         return _json(run_workflow_plan(params.task, cwd=Path(params.cwd) if params.cwd else None))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(
+    name="cc_write_claude_md",
+    annotations={
+        "title": "Write CLAUDE.md for Claude Code Workers",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    },
+)
+async def cc_write_claude_md(params: ClaudeMdInput) -> str:
+    """Create or update a project CLAUDE.md for Claude Code sub-agent behavior.
+
+    The generated document tells Claude Code that Codex is the controller, embeds the
+    selected role instruction, and adds safety/progress rules for orchestrated workers.
+    Existing CLAUDE.md files are not overwritten unless append=true or force=true.
+    """
+    try:
+        return _json(
+            write_claude_md(
+                cwd=Path(params.cwd) if params.cwd else None,
+                role=params.role,
+                project_name=params.project_name,
+                append=params.append,
+                force=params.force,
+            )
+        )
     except Exception as exc:
         return _error(exc)
 

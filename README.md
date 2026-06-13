@@ -20,11 +20,13 @@
   <img alt="CCSwitch" src="https://img.shields.io/badge/CCSwitch-Model_Router-purple">
 </p>
 
-> 中文版文档：[`README.zh-CN.md`](README.zh-CN.md)
+<p align="center">
+  中文版文档：<a href="README.zh-CN.md"><b>README.zh-CN.md</b></a>
+</p>
 
 ---
 
-### Plain-English Pitch
+<h2 align="center">Plain-English Pitch</h2>
 
 GPT-class models are excellent.
 
@@ -54,7 +56,7 @@ In other words:
 
 This is a miniature cost-management operating system for multi-agent coding.
 
-### What It Is
+<h2 align="center">What It Is</h2>
 
 `claude-code-orchestrator-skill` is a Codex Skill with a bundled MCP server and CLI.
 
@@ -70,8 +72,9 @@ It lets Codex:
 - save run metadata and logs
 - expose everything through MCP tools
 - handle Windows UTF-8 output safely
+- write a project `CLAUDE.md` so Claude Code workers receive stable role/persona instructions
 
-### Requirements
+<h2 align="center">Requirements</h2>
 
 You need:
 
@@ -89,7 +92,7 @@ The Skill is most powerful when CCSwitch has several models with different stren
 - review/security model
 - fallback model
 
-### One-Line Agent Install Prompt
+<h2 align="center">One-Line Agent Install Prompt</h2>
 
 Paste this into Codex:
 
@@ -97,7 +100,7 @@ Paste this into Codex:
 Install the Codex Skill and MCP server from https://github.com/chu459/claude-code-orchestrator-skill. Put the Skill at ~/.codex/skills/claude-code-orchestrator, wire the bundled MCP server into Codex config.toml, run selftest, healthcheck, score-models, and show me the selected multi-agent routing plan. Do not print secrets.
 ```
 
-### Install
+<h2 align="center">Install</h2>
 
 Windows PowerShell:
 
@@ -119,7 +122,7 @@ unzip -q "$tmp/skill.zip" -d "$tmp" && \
 bash "$tmp"/claude-code-orchestrator-skill-main/install/install.sh
 ```
 
-### MCP Setup
+<h2 align="center">MCP Setup</h2>
 
 Add this to Codex `config.toml`:
 
@@ -136,7 +139,7 @@ PYTHONIOENCODING = "utf-8"
 PYTHONUTF8 = "1"
 ```
 
-### Quick Check
+<h2 align="center">Quick Check</h2>
 
 ```bash
 export CC_ORCHESTRATOR_HOME="$HOME/.codex/skills/claude-code-orchestrator/scripts/cc-orchestrator"
@@ -145,7 +148,57 @@ python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" healthcheck
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" score-models
 ```
 
-### Included MCP Tools
+<h2 align="center">Common Commands</h2>
+
+Healthcheck:
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" healthcheck
+```
+
+List CCSwitch profiles:
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" list-profiles
+```
+
+Score local models:
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" score-models
+```
+
+Write strategy reports:
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" write-reports
+```
+
+Write a `CLAUDE.md` worker persona into a project:
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" write-claude-md --cwd /path/to/project --role implementation
+```
+
+Run a read-only architecture worker:
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" run "Map this repository architecture" --role architecture
+```
+
+Open a visible Claude Code worker window:
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" run-visible "Inspect this repository" --role architecture
+```
+
+Inspect the latest run:
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" last-run
+```
+
+<h2 align="center">Included MCP Tools</h2>
 
 | Tool | Purpose |
 | --- | --- |
@@ -157,10 +210,65 @@ python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" score-models
 | `cc_last_run` | Inspect last run |
 | `cc_git_diff` | Inspect git diff |
 | `cc_workflow_plan` | Build a multi-agent workflow plan |
+| `cc_write_claude_md` | Write a project `CLAUDE.md` for Claude Code worker behavior |
 | `cc_score_models` | Score local models |
 | `cc_write_strategy_reports` | Write score and routing reports |
 
-### The Core Idea
+<h2 align="center">Configuring CLAUDE.md for Claude Code Workers</h2>
+
+Claude Code can read a project-level `CLAUDE.md` file.
+
+This is extremely useful for orchestration, because Codex can set the worker's persona before launching it.
+
+The generated `CLAUDE.md` tells Claude Code:
+
+- Codex is the controller, planner, reviewer, and final decision maker
+- Claude Code is an external worker process
+- the assigned role, such as `architecture`, `implementation`, or `review`
+- safety rules about secrets, destructive commands, and unrelated changes
+- progress-reporting rules for long-running work
+
+Create one:
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" write-claude-md --cwd /path/to/project --role review
+```
+
+If the project already has `CLAUDE.md`, the command is conservative:
+
+- default: do not overwrite
+- `--append`: append the orchestrator-managed section
+- `--force`: replace after writing a timestamped backup
+
+Through MCP, Codex can call:
+
+```text
+cc_write_claude_md
+```
+
+Recommended flow:
+
+```text
+1. Codex plans the work
+2. Codex writes CLAUDE.md for the selected worker role
+3. Codex launches Claude Code through this Skill
+4. Claude Code follows the project persona and role rules
+5. Codex reviews logs, diffs, and final output
+```
+
+<h2 align="center">Multi-Agent Roles</h2>
+
+| Role | Purpose |
+| --- | --- |
+| `requirements` | Requirements, scope, non-goals, acceptance criteria |
+| `architecture` | Repository map, likely files, implementation strategy, risks |
+| `security` | Secrets, permissions, command risk, supply-chain risk |
+| `testing` | Validation commands, expected signals, residual risk |
+| `implementation` | Scoped edits when write access is explicitly allowed |
+| `review` | Findings ordered by severity, file references, open questions |
+| `ops` | Deployment, logs, rollback, runtime risk |
+
+<h2 align="center">The Core Idea</h2>
 
 This project is not just “spawn more agents”.
 
@@ -175,10 +283,108 @@ Manager: Codex controls the flow
 
 That is why it is a cost-management harness.
 
-### License
+<h2 align="center">Architecture</h2>
+
+```mermaid
+flowchart TD
+  User["User"] --> Codex["Codex Controller"]
+  Codex --> Skill["Claude Code Orchestrator Skill"]
+  Skill --> MCP["Bundled MCP Server"]
+  Skill --> CLI["cc_orchestrator.py CLI"]
+  MCP --> Router["Role + Model Router"]
+  CLI --> Router
+  Router --> CCSwitch["CCSwitch Profiles"]
+  CCSwitch --> Models["Qwen / GLM / Claude-compatible Models"]
+  Router --> ClaudeMD["Project CLAUDE.md"]
+  ClaudeMD --> ClaudeCode["Claude Code Worker Process"]
+  Router --> ClaudeCode
+  ClaudeCode --> Runs["runs/<run_id> logs"]
+  Runs --> Codex
+```
+
+<h2 align="center">Safety Defaults</h2>
+
+The default posture is intentionally conservative:
+
+- read-only planning by default
+- `permission_mode = plan` unless write access is explicitly enabled
+- `allow_write=true` required for scoped implementation work
+- no global CCSwitch mutation
+- secrets are redacted from tool output and persisted logs
+- UTF-8-safe output on Windows
+- timeout output is preserved when Python exposes partial stdout/stderr
+- existing `CLAUDE.md` files are not overwritten unless `--append` or `--force` is used
+
+<h2 align="center">Live Progress</h2>
+
+What works today:
+
+1. use `run-visible` to watch Claude Code in a real terminal window
+2. use `last-run` to inspect the latest run metadata and tails
+3. tail the saved stdout/stderr files
+
+Windows:
+
+```powershell
+Get-Content "$env:CC_ORCHESTRATOR_HOME\runs\<run_id>\stdout.txt" -Wait
+```
+
+macOS / Linux:
+
+```bash
+tail -f "$CC_ORCHESTRATOR_HOME/runs/<run_id>/stdout.txt"
+```
+
+The next serious upgrade is an event stream:
+
+```text
+events.jsonl
+cc_watch_runs
+cc_run_status
+terminal dashboard
+Codex live polling
+```
+
+Full design notes:
+
+```text
+docs/realtime-progress.md
+```
+
+<h2 align="center">Open-Source Position</h2>
+
+The goal is intentionally ambitious:
+
+> Become one of the world's top multi-agent collaboration harnesses: strong models as the brain, cheaper models as hands, Codex as controller, and MCP as the nervous system.
+
+This is not about spectacle.
+
+It is about bringing model cost, context cost, worker cost, and human attention cost into one auditable engineering loop.
+
+<h2 align="center">Roadmap</h2>
+
+- [x] Codex Skill
+- [x] Bundled MCP Server
+- [x] CCSwitch profile discovery
+- [x] Local model scoring
+- [x] Role-based model routing
+- [x] Claude Code subprocess launching
+- [x] Visible Claude Code window
+- [x] UTF-8 safe Windows output
+- [x] Run logs and `last-run`
+- [x] `CLAUDE.md` worker persona writer
+- [ ] Live event stream
+- [ ] Terminal dashboard
+- [ ] Web dashboard
+- [ ] Cost budget policy
+- [ ] Parallel run coordinator
+- [ ] Agent result voting
+- [ ] Automatic cross-review
+
+<h2 align="center">License</h2>
 
 MIT.
 
-### Attribution
+<h2 align="center">Attribution</h2>
 
 Not affiliated with OpenAI, Anthropic, Claude, Claude Code, or CCSwitch.
