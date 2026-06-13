@@ -5,6 +5,9 @@ hero:
   name: Make Plus feel like Pro
   text: Claude Code Orchestrator Skill
   tagline: Codex stays in control. Claude Code workers run through CCSwitch and local model routing.
+  image:
+    src: /assets/cover.png
+    alt: Claude Code Orchestrator technical cover
   actions:
     - theme: brand
       text: Get started
