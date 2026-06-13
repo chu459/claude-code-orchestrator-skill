@@ -1,0 +1,115 @@
+name: Deploy docs
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - docs-site/**
+      - package.json
+      - package-lock.json
+      - .github/workflows/deploy-docs.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Python smoke checks
+        env:
+          PYTHONPYCACHEPREFIX: ${{ runner.temp }}/pycache
+        run: |
+          python -m py_compile scripts/cc-orchestrator/cc_orchestrator.py scripts/cc-orchestrator/server.py
+          python scripts/cc-orchestrator/cc_orchestrator.py selftest
+
+      - name: Secret scan
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+          import sys
+
+          patterns = [
+              re.compile(r"sk-[A-Za-z0-9_-]{10,}"),
+              re.compile(r"ghp_[A-Za-z0-9_]{20,}"),
+              re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
+              re.compile(r"npm_[A-Za-z0-9]{20,}"),
+              re.compile(r"AKIA[0-9A-Z]{16}"),
+              re.compile(r"AIza[0-9A-Za-z_-]{35}"),
+              re.compile(r"Bearer\s+[A-Za-z0-9._~+/=-]{20,}"),
+              re.compile(r"-----BEGIN (RSA|OPENSSH|PRIVATE) KEY-----"),
+          ]
+          skipped_parts = {".git", "node_modules", "dist", "build", ".vitepress/cache"}
+          hits = []
+          for path in Path(".").rglob("*"):
+              if not path.is_file() or any(part in skipped_parts for part in path.parts):
+                  continue
+              try:
+                  text = path.read_text(encoding="utf-8")
+              except UnicodeDecodeError:
+                  continue
+              for line_no, line in enumerate(text.splitlines(), 1):
+                  if any(pattern.search(line) for pattern in patterns):
+                      hits.append(f"{path}:{line_no}")
+          if hits:
+              print("Potential secrets found:")
+              print("\n".join(hits))
+              sys.exit(1)
+
+  build:
+    runs-on: ubuntu-latest
+    needs: checks
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build docs
+        run: npm run docs:build
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs-site/.vitepress/dist
+
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

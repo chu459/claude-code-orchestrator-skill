@@ -1,0 +1,13 @@
+{
+  "name": "claude-code-orchestrator-skill-docs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "docs:dev": "vitepress dev docs-site --host 0.0.0.0",
+    "docs:build": "vitepress build docs-site",
+    "docs:preview": "vitepress preview docs-site --host 0.0.0.0"
+  },
+  "devDependencies": {
+    "vitepress": "^1.6.4"
+  }
+}
