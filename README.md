@@ -13,6 +13,10 @@
 </p>
 
 <p align="center">
+  <b>让 Plus 的额度，用出 Pro 的效果。</b>
+</p>
+
+<p align="center">
   <b>A world-class multi-agent engineering harness for Codex, Claude Code, CCSwitch, and local model routing.</b>
 </p>
 
@@ -35,12 +39,28 @@
 
 众所周知，GPT / GPT Plus 很好用。
 
-但好模型的额度少、成本高、不能无限开火。
+但现实问题也很直接：Plus 的额度不是无限的。
+
+如果你在 Codex 里直接开很多子智能体，强模型会很快被烧光。
+
+一次复杂项目拆解、一次多 Agent 审查、一次并行修复，就可能把本来很宝贵的额度消耗掉。
+
+所以我做了这个 Skill。
+
+它的目标就是：
+
+> 让 Plus 的额度，用出 Pro 的效果。
 
 所以这套 Skill 的思路是：
 
 > 让最强、最好用的模型当“大脑”，负责判断、拆解、调度、验收；  
 > 让 Claude Code 和 CCSwitch 里的多个模型当“手”，负责跑子任务、做分析、写代码、做测试、做审查。
+
+换句话说：
+
+> Codex 不再亲自干所有脏活累活。  
+> Codex 负责做总控、做判断、做验收。  
+> Claude Code 负责带着本地模型工人去执行。
 
 这不是一个普通脚本。
 
@@ -429,13 +449,29 @@ This project is not affiliated with OpenAI, Anthropic, Claude, Claude Code, or C
 
 GPT-class models are excellent.
 
-But the best models are expensive, quota-limited, and too valuable to burn on every subtask.
+But Plus-level quotas are not infinite.
+
+If you spawn many internal subagents directly inside Codex, your best-model quota can disappear fast.
+
+A deep repo audit, a parallel multi-agent review, or one ambitious refactor can burn through the budget you wanted to save for judgment.
+
+That is why this Skill exists.
+
+The mission:
+
+> Make Plus feel like Pro.
 
 This Skill turns that constraint into an engineering system:
 
 > Let the best model act as the brain.  
 > Let Claude Code plus your CCSwitch models act as hands.  
 > Let Codex stay in control.
+
+In other words:
+
+> Codex does not need to do every low-level subtask itself.  
+> Codex plans, routes, supervises, and verifies.  
+> Claude Code executes through external worker models.
 
 This is a miniature cost-management operating system for multi-agent coding.
 
