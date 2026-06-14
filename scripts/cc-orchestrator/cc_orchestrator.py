@@ -2820,9 +2820,18 @@ def calibrate_policy(preferences: dict[str, Any], apply: bool = True) -> dict[st
     return {"ok": True, "applied": apply, "path": str(CALIBRATION_PATH), "calibration": data}
 
 
-def dashboard(include_finished: bool = True, limit: int = 30, open_browser: bool = False) -> dict[str, Any]:
+def dashboard(include_finished: bool = True, limit: int = 12, open_browser: bool = False) -> dict[str, Any]:
     DASHBOARD_DIR.mkdir(parents=True, exist_ok=True)
     data = run_status(include_finished=include_finished, include_output_tail=True, tail_chars=1000, limit=limit)
+    route_cards: list[str] = []
+    for role in ("development", "review", "security", "multimodal"):
+        try:
+            route = select_model_for_role(role=role, task_type="multimodal" if role == "multimodal" else None)
+            route_cards.append(
+                f"<div class='route'><b>{html_lib.escape(role)}</b><span>{html_lib.escape(str(route.get('model') or 'unknown'))}</span><small>{html_lib.escape(str(route.get('reason') or ''))}</small></div>"
+            )
+        except Exception as exc:
+            route_cards.append(f"<div class='route'><b>{html_lib.escape(role)}</b><span>unavailable</span><small>{html_lib.escape(str(exc))}</small></div>")
     workers = []
     timelines = []
     risks = []
@@ -2845,22 +2854,34 @@ def dashboard(include_finished: bool = True, limit: int = 30, open_browser: bool
         )
         timeline_lines = "".join(f"<li>{html_lib.escape(line[2:] if line.startswith('- ') else line)}</li>" for line in timeline_text.splitlines() if line.startswith("- "))
         timelines.append(
-            f"<section class='panel'><h2>{item.get('role')} <code>{run_id}</code></h2>"
+            f"<section class='panel'><h2>Timeline / Logs <code>{run_id}</code></h2>"
             f"<p><b>{progress.get('recommended_action')}</b> · phase {progress.get('phase') or 'unknown'} · changed {changed.get('file_count', 0)} files</p>"
             f"<ol>{timeline_lines or '<li>No timeline events yet.</li>'}</ol></section>"
         )
         risk_items = "".join(f"<li><b>{html_lib.escape(str(flag.get('severity')))}</b> {html_lib.escape(str(flag.get('code')))}: {html_lib.escape(str(flag.get('message')))}</li>" for flag in risk.get("flags", []))
+        control_lines = [
+            f"poll-run --run-id {run_id}",
+            f"summarize-run --run-id {run_id}",
+            f"verify-run --run-id {run_id}",
+            f"stop-run --run-id {run_id} --force",
+            f"open-run-folder --run-id {run_id}",
+        ]
+        controls = "".join(f"<li><code>{html_lib.escape(command)}</code></li>" for command in control_lines)
         risks.append(
-            f"<section class='panel'><h2>Risk <code>{run_id}</code></h2>"
+            f"<section class='panel'><h2>Diff / Risk / Controls <code>{run_id}</code></h2>"
             f"<ul>{risk_items or '<li>No risk flags detected.</li>'}</ul>"
-            f"<p>Files: {html_lib.escape(', '.join(changed.get('files', [])[:8]) or 'none')}</p></section>"
+            f"<p>Files: {html_lib.escape(', '.join(changed.get('files', [])[:8]) or 'none')}</p>"
+            f"<h3>Controls</h3><ul>{controls}</ul></section>"
         )
     html = "\n".join(
         [
             "<!doctype html><html><head><meta charset='utf-8'><title>Claude Code Workers</title>",
-            "<style>body{font-family:system-ui;background:#0d1117;color:#e6edf3;margin:0}header{padding:16px 20px;border-bottom:1px solid #30363d;background:#161b22}.grid{display:grid;grid-template-columns:280px minmax(360px,1fr) 360px;gap:16px;padding:16px}.panel,.worker{border:1px solid #30363d;border-radius:8px;background:#161b22}.panel{padding:14px;margin-bottom:12px}.worker{width:100%;text-align:left;color:#e6edf3;padding:12px;margin-bottom:10px;display:block}.worker span{display:flex;justify-content:space-between;gap:8px}.worker small{display:block;color:#8b949e;margin-top:6px}code{color:#7ee787}ol,ul{padding-left:22px}li{margin:8px 0;line-height:1.35}p{color:#c9d1d9}</style>",
+            "<style>body{font-family:system-ui;background:#0d1117;color:#e6edf3;margin:0}header{padding:16px 20px;border-bottom:1px solid #30363d;background:#161b22}.routes{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-top:12px}.route{border:1px solid #30363d;border-radius:8px;padding:10px;background:#0d1117}.route b,.route span,.route small{display:block}.route span{color:#7ee787}.route small{color:#8b949e;margin-top:4px}.grid{display:grid;grid-template-columns:280px minmax(360px,1fr) 380px;gap:16px;padding:16px}.panel,.worker{border:1px solid #30363d;border-radius:8px;background:#161b22}.panel{padding:14px;margin-bottom:12px}.worker{width:100%;text-align:left;color:#e6edf3;padding:12px;margin-bottom:10px;display:block}.worker span{display:flex;justify-content:space-between;gap:8px}.worker small{display:block;color:#8b949e;margin-top:6px}code{color:#7ee787;overflow-wrap:anywhere}ol,ul{padding-left:22px}li{margin:8px 0;line-height:1.35}p{color:#c9d1d9}h3{margin-bottom:4px}</style>",
             "</head><body><header><h1>Claude Code Worker Dashboard</h1>",
-            f"<p>Generated at {utc_now_iso()} · Runs {data.get('count', 0)} · Active {data.get('active_count', 0)}</p></header>",
+            f"<p>Generated at {utc_now_iso()} · Runs {data.get('count', 0)} · Active {data.get('active_count', 0)}</p>",
+            "<h2>Model Routing</h2><div class='routes'>",
+            "".join(route_cards),
+            "</div></header>",
             "<main class='grid'><aside>",
             "".join(workers) if workers else "<p>No runs found.</p>",
             "</aside><section>",
@@ -4226,7 +4247,7 @@ def main() -> int:
     dash = sub.add_parser("dashboard")
     dash.add_argument("--include-finished", action="store_true")
     dash.add_argument("--active-only", action="store_true")
-    dash.add_argument("--limit", type=int, default=30)
+    dash.add_argument("--limit", type=int, default=12)
     dash.add_argument("--open", action="store_true")
     open_folder = sub.add_parser("open-run-folder")
     open_folder.add_argument("--run-id", required=True)

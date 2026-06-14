@@ -377,7 +377,7 @@ class DashboardInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
     include_finished: bool = True
-    limit: int = Field(default=30, ge=1, le=500)
+    limit: int = Field(default=12, ge=1, le=500)
     open_browser: bool = False
 
 
