@@ -1,10 +1,10 @@
 {
   "name": "claude-code-orchestrator-skill",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "schema_version": 2,
   "released_at": "2026-06-14",
   "notes": [
-    "Adds Codex Controller Playbook, Prompt Pack, compact controller polling, run summaries, real queue policy, model registry, local policy override preservation, worker quality scoring, failure-mode detection, and timeline dashboard."
+    "Adds rolling checkpoints, deduplicated tool-call summaries, default controller artifact writing, and exact queued/running/done/failed queue states on top of the v0.4 controller system."
   ],
   "local_user_owned_files": [
     "scripts/cc-orchestrator/config/model_calibration.json",

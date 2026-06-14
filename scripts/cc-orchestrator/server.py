@@ -125,7 +125,7 @@ class PollRunInput(BaseModel):
     mode: str = Field(default="controller", pattern="^(controller|raw)$", description="controller returns compact Codex progress; raw returns stdout/stderr/event deltas.")
     max_events: int = Field(default=20, ge=1, le=200, description="Maximum compact events returned in controller mode.")
     max_summary_chars: int = Field(default=2000, ge=200, le=20000, description="Budget for compact text fields.")
-    write_artifacts: bool = Field(default=False, description="Write controller artifact files while polling.")
+    write_artifacts: bool = Field(default=True, description="Write controller artifact files while polling.")
 
 
 class SummarizeRunInput(BaseModel):

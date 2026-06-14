@@ -15,7 +15,7 @@
 <p align="center">
   <a href="README.zh-CN.md"><img alt="README: 中文" src="https://img.shields.io/badge/README-中文-red"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-brightgreen"></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-v0.4.0-black">
+  <img alt="Version" src="https://img.shields.io/badge/version-v0.4.1-black">
   <img alt="Codex Skill" src="https://img.shields.io/badge/Codex-Skill-0A0A0A">
   <img alt="MCP Included" src="https://img.shields.io/badge/MCP-Included-blue">
   <img alt="CCSwitch" src="https://img.shields.io/badge/CCSwitch-Model_Router-purple">
@@ -30,11 +30,12 @@
 <h2 align="center">Latest Updates</h2>
 
 <p align="center">
-  <b>Current version: v0.4.0</b>
+  <b>Current version: v0.4.1</b>
 </p>
 
 | Version | What changed | Why it matters |
 | --- | --- | --- |
+| `v0.4.1` | Added rolling `checkpoint-###.md` summaries, deduplicated tool-call summaries, default artifact-writing controller poll, and exact `queued/running/done/failed` queue states. | Codex can now inspect only decision-grade summaries while workers keep raw audit logs on disk. |
 | `v0.4.0` | Added the Codex Controller Playbook, Prompt Pack, compact controller-mode polling, `cc_summarize_run`, `cc_compact_events`, one-click verification scoring, real queue policy, model registry, local override preservation, worker quality history, failure-mode detection, and timeline dashboard. | Codex can now manage Claude Code workers like a real controller: watch compact progress, stop bad runs, verify changes, learn which model is best, and preserve local preferences across upgrades. |
 | `v0.3.0` | Added `cc_verify_run`, hard write-scope checks, mock streaming E2E tests, queue scheduling, usage summaries, upgrade checks, MCP auto-registration, and benchmark suite. | Turns the project from “can run workers” into a safer control console with verification, migration, and low-cost testing. |
 | `v0.2.x` | Added live streaming control: `run-streaming`, `poll-run`, `stop-run`, `run-status`, team spawning, cross review, dashboard, reports, and cost guard. | Codex can watch and manage Claude Code workers in real time instead of waiting blindly. |
@@ -282,8 +283,8 @@ python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" last-run
 | `cc_run_agent` | Run a Claude Code worker |
 | `cc_run_streaming_agent` | Start a background Claude Code worker with `stream-json` events |
 | `cc_poll_run` | Poll one run in compact controller mode by default; raw deltas are still available |
-| `cc_summarize_run` | Write and return controller artifacts for a run |
-| `cc_compact_events` | Compact raw `events.ndjson` into a small timeline |
+| `cc_summarize_run` | Write and return controller artifacts plus rolling checkpoints |
+| `cc_compact_events` | Compact raw `events.ndjson` into a small timeline and deduplicated tool summary |
 | `cc_stop_run` | Stop a specific running Claude Code worker |
 | `cc_run_status` | List active Claude Code workers or inspect one run |
 | `cc_send_instruction` | Stop and restart a run with recovered context and a new instruction |
@@ -307,7 +308,7 @@ python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" last-run
 | `cc_usage_summary` | Estimate daily tokens, duration, failures, and model usage |
 | `cc_queue_submit` | Submit a priority worker job |
 | `cc_queue_tick` | Start queued jobs up to the concurrency limit |
-| `cc_queue_status` | Inspect pending/running/finished queue jobs |
+| `cc_queue_status` | Inspect `queued`, `running`, `done`, `failed`, `timed_out`, and `cancelled` jobs |
 | `cc_queue_cancel` | Cancel a queued or running job |
 | `cc_queue_policy` | Read or write queue concurrency, retry, and timeout policy |
 | `cc_upgrade_check` | Preserve local model preferences across upgrades |
@@ -473,7 +474,7 @@ The P0 live-control loop is:
 ```text
 cc_run_streaming_agent -> events.ndjson
 cc_poll_run -> compact controller progress, risk flags, changed files, timeline
-cc_summarize_run -> write controller artifacts
+cc_summarize_run -> write controller artifacts and checkpoint-###.md
 cc_run_status -> active worker list
 cc_stop_run -> kill a stuck or expensive worker
 ```
@@ -527,6 +528,8 @@ It is about bringing model cost, context cost, worker cost, and human attention 
 - [x] Codex Controller Playbook
 - [x] Prompt Pack
 - [x] Compact controller-mode polling
+- [x] Rolling checkpoint summaries
+- [x] Tool-call deduplication
 - [x] Run timeline visualization
 - [x] Model registry and benchmark history
 - [x] Local policy override preserved across upgrades

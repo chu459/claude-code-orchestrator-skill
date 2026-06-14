@@ -24,7 +24,7 @@
   <a href="README.md"><img alt="Language: English" src="https://img.shields.io/badge/README-English-black"></a>
   <a href="README.md"><img alt="Default README: English" src="https://img.shields.io/badge/Default-English-blue"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-brightgreen"></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-v0.4.0-black">
+  <img alt="Version" src="https://img.shields.io/badge/version-v0.4.1-black">
   <img alt="Codex Skill" src="https://img.shields.io/badge/Codex-Skill-0A0A0A">
   <img alt="MCP Included" src="https://img.shields.io/badge/MCP-Included-blue">
   <img alt="CCSwitch" src="https://img.shields.io/badge/CCSwitch-Model_Router-purple">
@@ -35,11 +35,12 @@
 <h2 align="center">更新日志</h2>
 
 <p align="center">
-  <b>当前版本：v0.4.0</b>
+  <b>当前版本：v0.4.1</b>
 </p>
 
 | 版本 | 更新内容 | 为什么重要 |
 | --- | --- | --- |
+| `v0.4.1` | 新增滚动 `checkpoint-###.md` 总结、工具调用去重摘要、默认写入总控摘要文件的 controller poll，以及明确的 `queued/running/done/failed` 队列状态。 | Codex 平时只看决策级摘要，raw 日志继续留在磁盘审计，既省额度又更好控场。 |
 | `v0.4.0` | 新增 Codex 总控手册、Prompt Pack、压缩版总控轮询、`cc_summarize_run`、`cc_compact_events`、一键验收评分、真正的队列策略、模型能力库、本机偏好保留、worker 质量历史、失败模式识别、时间线看板。 | Codex 不再只是等 worker 回来，而是能边看边管、发现跑偏就停、改完自动验收、持续学习哪个模型最适合哪类任务。 |
 | `v0.3.0` | 新增 `cc_verify_run`、写入范围硬检查、mock streaming 端到端测试、任务队列、每日用量统计、升级迁移、MCP 自动注册、benchmark suite。 | 从“能跑 worker”，升级成“能验收、能回滚建议、能迁移、能低成本测试”的控制台。 |
 | `v0.2.x` | 新增实时控制：`run-streaming`、`poll-run`、`stop-run`、`run-status`、角色团队、交叉审查、看板、报告、成本护栏。 | Codex 可以边看边管 Claude Code worker，不用盲等结果。 |
@@ -367,8 +368,8 @@ Codex 可以调用这些工具：
 | `cc_run_agent` | 跑一个 Claude Code 子 Agent |
 | `cc_run_streaming_agent` | 启动带 `stream-json` 事件的后台 Claude Code worker |
 | `cc_poll_run` | 默认查询压缩后的总控进度，也可切到 raw 模式看原始增量 |
-| `cc_summarize_run` | 写入并返回某次 run 的总控摘要文件 |
-| `cc_compact_events` | 把原始 `events.ndjson` 压缩成小时间线 |
+| `cc_summarize_run` | 写入并返回总控摘要和滚动 checkpoint |
+| `cc_compact_events` | 把原始 `events.ndjson` 压缩成小时间线和去重工具摘要 |
 | `cc_stop_run` | 停止指定 run id 的 Claude Code worker |
 | `cc_run_status` | 列出正在运行的 workers，或查看某个 run |
 | `cc_send_instruction` | 通过“停止并带上下文重启”追加指令 |
@@ -392,7 +393,7 @@ Codex 可以调用这些工具：
 | `cc_usage_summary` | 从日志估算每日 token、耗时、失败率和模型用量 |
 | `cc_queue_submit` | 提交一个优先级队列任务 |
 | `cc_queue_tick` | 按并发上限启动排队任务 |
-| `cc_queue_status` | 查看队列状态 |
+| `cc_queue_status` | 查看 `queued`、`running`、`done`、`failed`、`timed_out`、`cancelled` 队列状态 |
 | `cc_queue_cancel` | 取消排队或运行中的任务 |
 | `cc_queue_policy` | 读写队列并发、重试和超时策略 |
 | `cc_upgrade_check` | 升级时保留本机模型偏好、模型库、质量历史、队列策略和成本配置 |
@@ -566,7 +567,7 @@ P0 实时掌控四件套已经可用：
 ```text
 cc_run_streaming_agent
 cc_poll_run -> 压缩总控进度、风险、改动文件、时间线
-cc_summarize_run -> 写入总控摘要文件
+cc_summarize_run -> 写入总控摘要和 checkpoint-###.md
 cc_stop_run
 cc_run_status
 ```
@@ -630,6 +631,8 @@ docs/realtime-progress.md
 - [x] Codex Controller Playbook
 - [x] Prompt Pack
 - [x] Compact controller-mode polling
+- [x] Rolling checkpoint summaries
+- [x] Tool-call deduplication
 - [x] Run timeline visualization
 - [x] Model registry and benchmark history
 - [x] Local policy override preserved across upgrades

@@ -112,7 +112,7 @@ python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" stop-run --run-id <run_id> --f
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" mock-stream-test
 ```
 
-`poll-run` defaults to controller mode. It returns compact progress, risk flags, changed files, and a timeline instead of dumping raw events.
+`poll-run` defaults to controller mode. It returns compact progress, risk flags, changed files, a timeline, deduplicated tool-call summary, and rolling checkpoint paths instead of dumping raw events.
 
 `mock-stream-test` uses a fake Claude stream, so it checks `events.ndjson`, polling, status, and stop without spending model quota.
 
@@ -142,3 +142,5 @@ python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" usage-summary --write-report
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" benchmark-suite
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" upgrade-check --apply
 ```
+
+Queue jobs use `queued`, `running`, `done`, `failed`, `timed_out`, and `cancelled` states.

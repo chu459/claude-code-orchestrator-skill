@@ -250,7 +250,8 @@ Use the same role names through MCP:
 - `cc_pick_profile`, `cc_run_agent`, `cc_run_streaming_agent`, `cc_run_visible_agent`, and `cc_write_claude_md` accept `role`.
 - `cc_run_streaming_agent` starts a background Claude Code worker and writes `events.ndjson`.
 - `cc_poll_run` defaults to controller mode: status, compact progress, risk flags, changed files, timeline, and attention signals. Use raw mode only when debugging.
-- `cc_compact_events` writes `progress_summary.json`, `latest_decision.md`, `risk_flags.json`, `changed_files.json`, and `tool_timeline.md`.
+- `cc_compact_events` returns compact events plus deduplicated tool-call summaries.
+- `cc_poll_run` and `cc_summarize_run` write `progress_summary.json`, `latest_decision.md`, `risk_flags.json`, `changed_files.json`, `tool_timeline.md`, and rolling `checkpoints/checkpoint-###.md`.
 - `cc_summarize_run` returns the latest controller summary for one run.
 - `cc_stop_run` terminates a specific run id.
 - `cc_run_status` lists active workers or returns one run's status.
@@ -273,7 +274,7 @@ Use the same role names through MCP:
 - `cc_prompt_pack` lists or renders reusable worker prompt templates.
 - `cc_cost_guard` stores max concurrency and timeout guardrails.
 - `cc_usage_summary` estimates daily tokens, duration, failures, and per-model usage from logs.
-- `cc_queue_submit`, `cc_queue_tick`, `cc_queue_status`, and `cc_queue_cancel` provide priority queue scheduling with concurrency and retry metadata.
+- `cc_queue_submit`, `cc_queue_tick`, `cc_queue_status`, and `cc_queue_cancel` provide priority queue scheduling with `queued`, `running`, `done`, `failed`, `timed_out`, and `cancelled` states.
 - `cc_upgrade_check` records version state while preserving local calibration/cost files.
 - `cc_mock_stream_test` uses a fake Claude stream to validate `events.ndjson`, polling, status, and stop without spending model quota.
 - `cc_dashboard` generates a local HTML worker dashboard.

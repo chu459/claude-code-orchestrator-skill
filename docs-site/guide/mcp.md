@@ -41,8 +41,8 @@ docs/mcp.codex.example.toml
 | `cc_run_agent` | Runs one Claude Code worker |
 | `cc_run_streaming_agent` | Starts a background worker with live `events.ndjson` |
 | `cc_poll_run` | Polls compact controller progress by default |
-| `cc_summarize_run` | Writes and returns controller artifacts |
-| `cc_compact_events` | Compacts raw events into a small timeline |
+| `cc_summarize_run` | Writes and returns controller artifacts plus rolling checkpoints |
+| `cc_compact_events` | Compacts raw events into a timeline and deduplicated tool summary |
 | `cc_run_status` | Lists active workers or inspects one run |
 | `cc_stop_run` | Stops one worker by run id |
 | `cc_send_instruction` | Restarts a run with recovered context and a new instruction |
@@ -66,7 +66,7 @@ docs/mcp.codex.example.toml
 | `cc_usage_summary` | Estimates daily usage from logs |
 | `cc_queue_submit` | Submits a queued worker job |
 | `cc_queue_tick` | Starts queued jobs up to a limit |
-| `cc_queue_status` | Reads queue state |
+| `cc_queue_status` | Reads `queued`, `running`, `done`, `failed`, `timed_out`, and `cancelled` state |
 | `cc_queue_cancel` | Cancels a queue job |
 | `cc_queue_policy` | Reads or writes queue concurrency, retry, and timeout policy |
 | `cc_upgrade_check` | Preserves local preferences across upgrades |

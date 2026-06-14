@@ -166,6 +166,8 @@ CONTROLLER_ARTIFACTS = {
     "changed_files": "changed_files.json",
     "tool_timeline": "tool_timeline.md",
 }
+CHECKPOINT_EVENT_INTERVAL = 10
+CHECKPOINT_SECONDS_INTERVAL = 30
 FAILURE_PATTERNS = {
     "test_failed": re.compile(r"\b(test|pytest|npm test|pnpm test|vitest|jest).{0,80}\b(fail|failed|error|exit code [1-9])\b", re.IGNORECASE),
     "claimed_success": re.compile(r"\b(success|succeeded|done|completed|all tests pass|tests passed)\b", re.IGNORECASE),
@@ -803,6 +805,7 @@ def compact_events(
     recent = read_events(events_path, max_lines=max(max_events * 4, 80))
     compact_recent = [compact_event(event) for event in recent][-max_events:]
     summary = summarize_events(recent)
+    tool_summary = summarize_tool_calls(compact_recent)
     timeline_md = build_tool_timeline_md(compact_recent)
     artifact_paths = {
         "tool_timeline": str(run_dir / CONTROLLER_ARTIFACTS["tool_timeline"]),
@@ -822,6 +825,7 @@ def compact_events(
         "items": compact_recent,
         "latest_phase": summary.get("latest_phase"),
         "tool_calls": summary.get("tool_calls", []),
+        "tool_call_summary": tool_summary,
         "tool_timeline": timeline_md,
         "artifact_paths": artifact_paths,
     }
@@ -841,6 +845,119 @@ def build_tool_timeline_md(events: list[dict[str, Any]]) -> str:
         suffix = f" tools: {tools}" if tools else ""
         lines.append(f"- `{clock}` **{phase}** {text}{suffix}".rstrip())
     return "\n".join(lines).rstrip() + "\n"
+
+
+def summarize_tool_calls(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    buckets: dict[str, dict[str, Any]] = {}
+    for event in events:
+        for call in event.get("tool_calls") or []:
+            name = str(call.get("name") or call.get("type") or "tool")
+            bucket = buckets.setdefault(name, {"name": name, "count": 0, "first_seq": event.get("seq"), "last_seq": event.get("seq")})
+            bucket["count"] += 1
+            bucket["last_seq"] = event.get("seq")
+    items = sorted(buckets.values(), key=lambda item: (-int(item.get("count") or 0), str(item.get("name") or "")))
+    return items
+
+
+def latest_meaningful_action(events: list[dict[str, Any]], status: dict[str, Any]) -> str:
+    for event in reversed(events):
+        text = str(event.get("text") or "").strip()
+        phase = str(event.get("phase") or event.get("type") or "").strip()
+        if text and text not in {"claude_stream", "process_exited", "process_started", "run_started", "stream_worker_started", "stream_worker_ready"}:
+            return text[:500]
+        if phase in {"tool", "responding", "finished", "stderr"}:
+            return phase
+    return str(status.get("last_stdout_line") or status.get("last_stderr_line") or status.get("status") or "no signal yet")[:500]
+
+
+def new_findings_from_events(events: list[dict[str, Any]], limit: int = 5) -> list[str]:
+    findings: list[str] = []
+    markers = ("found", "risk", "error", "fail", "changed", "edited", "created", "updated", "fixed", "发现", "风险", "失败", "错误", "修改", "创建", "修复")
+    for event in reversed(events):
+        text = str(event.get("text") or "").replace("\n", " ").strip()
+        if len(text) < 4:
+            continue
+        if any(marker in text.lower() for marker in markers):
+            if text not in findings:
+                findings.append(text[:300])
+        if len(findings) >= limit:
+            break
+    return list(reversed(findings))
+
+
+def should_write_checkpoint(run_dir: Path, event_count: int) -> tuple[bool, dict[str, Any]]:
+    checkpoint_dir = run_dir / "checkpoints"
+    manifest_path = checkpoint_dir / "manifest.json"
+    manifest = read_json_file(manifest_path, {"next_index": 1, "last_event_count": 0, "last_written_at": None, "checkpoints": []})
+    last_count = int(manifest.get("last_event_count") or 0)
+    last_age = _iso_age_seconds(str(manifest.get("last_written_at") or ""))
+    if not manifest.get("checkpoints"):
+        return True, manifest
+    if event_count - last_count >= CHECKPOINT_EVENT_INTERVAL:
+        return True, manifest
+    if last_age is not None and last_age >= CHECKPOINT_SECONDS_INTERVAL:
+        return True, manifest
+    return False, manifest
+
+
+def write_run_checkpoint(
+    run_dir: Path,
+    progress: dict[str, Any],
+    risks: dict[str, Any],
+    changed_files: dict[str, Any],
+    tool_summary: list[dict[str, Any]],
+    event_count: int,
+    force: bool = False,
+) -> dict[str, Any]:
+    should_write, manifest = should_write_checkpoint(run_dir, event_count)
+    if not force and not should_write:
+        latest = (manifest.get("checkpoints") or [])[-1] if manifest.get("checkpoints") else {}
+        return {"written": False, "latest": latest, "manifest_path": str(run_dir / "checkpoints" / "manifest.json")}
+    checkpoint_dir = run_dir / "checkpoints"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    index = int(manifest.get("next_index") or 1)
+    path = checkpoint_dir / f"checkpoint-{index:03d}.md"
+    tool_lines = [f"- `{item.get('name')}` x{item.get('count')}" for item in tool_summary] or ["- No tool calls detected."]
+    risk_lines = [f"- `{flag.get('severity')}` `{flag.get('code')}`: {flag.get('message')}" for flag in risks.get("flags", [])] or ["- No drift detected."]
+    file_lines = [f"- `{path}`" for path in changed_files.get("files", [])[:30]] or ["- No changed files detected."]
+    finding_lines = [f"- {item}" for item in (progress.get("new_findings") or [])] or ["- No new findings detected."]
+    lines = [
+        f"# Run Checkpoint {index:03d}",
+        "",
+        f"Run: `{progress.get('run_id')}`",
+        f"Generated: {utc_now_iso()}",
+        f"Status: `{progress.get('status')}`",
+        f"Phase: `{progress.get('phase')}`",
+        f"Recommended action: `{progress.get('recommended_action')}`",
+        "",
+        "## Done",
+        f"- Last meaningful action: {progress.get('last_meaningful_action') or 'No meaningful action yet.'}",
+        f"- Events observed: `{event_count}`",
+        "",
+        "## Findings",
+        *finding_lines,
+        "",
+        "## Changed",
+        *file_lines,
+        "",
+        "## Repeated Tools",
+        *tool_lines,
+        "",
+        "## Remaining",
+        f"- Controller recommendation: `{progress.get('recommended_action')}`",
+        "",
+        "## Drift",
+        *risk_lines,
+    ]
+    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    checkpoints = manifest.setdefault("checkpoints", [])
+    item = {"index": index, "path": str(path), "event_count": event_count, "written_at": utc_now_iso()}
+    checkpoints.append(item)
+    manifest["next_index"] = index + 1
+    manifest["last_event_count"] = event_count
+    manifest["last_written_at"] = item["written_at"]
+    write_json_file(checkpoint_dir / "manifest.json", manifest)
+    return {"written": True, "latest": item, "manifest_path": str(checkpoint_dir / "manifest.json")}
 
 
 def changed_files_for_run(run_id: str) -> dict[str, Any]:
@@ -976,13 +1093,17 @@ def progress_summary_for_run(
             "phase": last.get("phase") or last.get("type"),
             "text": str(last.get("text") or "")[:max_summary_chars],
         },
+        "last_meaningful_action": latest_meaningful_action(recent, status)[:max_summary_chars],
+        "new_findings": new_findings_from_events(recent),
         "last_stdout_line": str(status.get("last_stdout_line") or "")[:max_summary_chars],
         "last_stderr_line": str(status.get("last_stderr_line") or "")[:max_summary_chars],
         "tool_call_count": len(compact.get("tool_calls") or []),
+        "tool_call_summary": compact.get("tool_call_summary") or [],
         "recent_tools": tool_names[-10:],
         "changed_file_count": changed_files.get("file_count", 0),
         "changed_files": changed_files.get("files", [])[:50],
         "risk_flag_count": risks.get("flag_count", 0),
+        "controller_attention_flags": risks.get("flags", []),
         "needs_controller_attention": risks.get("needs_controller_attention", False),
         "recommended_action": controller_recommendation(status, risks),
     }
@@ -1042,6 +1163,16 @@ def summarize_run(
         write_json_file(run_dir / CONTROLLER_ARTIFACTS["changed_files"], changed_files)
         (run_dir / CONTROLLER_ARTIFACTS["tool_timeline"]).write_text(compact.get("tool_timeline") or "", encoding="utf-8")
         write_latest_decision(run_dir, progress, risks)
+        checkpoint = write_run_checkpoint(
+            run_dir,
+            progress,
+            risks,
+            changed_files,
+            compact.get("tool_call_summary") or [],
+            int(compact.get("recent_event_count") or 0),
+        )
+    else:
+        checkpoint = {"written": False, "latest": None, "manifest_path": str(run_dir / "checkpoints" / "manifest.json")}
     return {
         "ok": True,
         "run_id": run_id,
@@ -1049,6 +1180,7 @@ def summarize_run(
         "risk_flags": risks,
         "changed_files": changed_files,
         "tool_timeline": compact.get("tool_timeline"),
+        "checkpoint": checkpoint,
         "offsets": {
             "event_offset": compact.get("offset"),
             "next_event_offset": compact.get("next_offset"),
@@ -2056,7 +2188,7 @@ def poll_run(
     mode: str = "raw",
     max_events: int = 20,
     max_summary_chars: int = 2000,
-    write_artifacts: bool = False,
+    write_artifacts: bool = True,
 ) -> dict[str, Any]:
     run_dir = safe_run_dir(run_id)
     status = single_run_status(run_id, include_output_tail=include_output_tail, tail_chars=tail_chars)
@@ -2079,6 +2211,7 @@ def poll_run(
             "risk_flags": summary.get("risk_flags"),
             "changed_files": summary.get("changed_files"),
             "tool_timeline": summary.get("tool_timeline"),
+            "checkpoint": summary.get("checkpoint"),
             "artifact_paths": summary.get("artifact_paths", {}),
         }
     if mode != "raw":
@@ -3103,6 +3236,8 @@ def load_queue() -> dict[str, Any]:
         for job in queue.get("jobs", []):
             if job.get("status") == "pending":
                 job["status"] = "queued"
+            elif job.get("status") == "succeeded":
+                job["status"] = "done"
         return queue
     return {"created_at": utc_now_iso(), "updated_at": None, "jobs": []}
 
@@ -3193,7 +3328,7 @@ def refresh_queue_job(job: dict[str, Any]) -> dict[str, Any]:
     if status.get("active"):
         return job
     if status.get("status") == "succeeded":
-        job["status"] = "succeeded"
+        job["status"] = "done"
     elif status.get("status") == "timed_out":
         job["status"] = "timed_out"
         job["last_error"] = f"Run {job['run_id']} timed out."
@@ -3954,7 +4089,7 @@ def main() -> int:
     poll.add_argument("--mode", choices=["raw", "controller"], default="controller")
     poll.add_argument("--max-events", type=int, default=20)
     poll.add_argument("--max-summary-chars", type=int, default=2000)
-    poll.add_argument("--write-artifacts", action="store_true")
+    poll.add_argument("--no-write-artifacts", action="store_true")
     summarize_cmd = sub.add_parser("summarize-run")
     summarize_cmd.add_argument("--run-id", required=True)
     summarize_cmd.add_argument("--event-offset", type=int, default=0)
@@ -4176,7 +4311,7 @@ def main() -> int:
                     mode=args.mode,
                     max_events=args.max_events,
                     max_summary_chars=args.max_summary_chars,
-                    write_artifacts=args.write_artifacts,
+                    write_artifacts=not args.no_write_artifacts,
                 )
             )
         elif args.command == "summarize-run":

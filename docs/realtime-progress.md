@@ -67,6 +67,8 @@ python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" poll-run --run-id <run_id>
 - risk flags
 - changed files
 - timeline
+- deduplicated tool-call summary
+- latest checkpoint
 - next offsets
 
 For cursor-style polling, pass the returned offsets:
@@ -99,6 +101,7 @@ This writes:
 - `risk_flags.json`
 - `changed_files.json`
 - `tool_timeline.md`
+- `checkpoints/checkpoint-###.md`
 
 ## List Active Workers
 
@@ -136,7 +139,7 @@ It launches a mock Claude command and verifies:
 
 - `events.ndjson` is written
 - `poll-run --mode raw` returns event deltas
-- `poll-run` returns compact controller progress
+- `poll-run` returns compact controller progress and writes rolling checkpoints
 - `run-status` sees an active worker
 - `stop-run` can terminate a long mock stream
 
