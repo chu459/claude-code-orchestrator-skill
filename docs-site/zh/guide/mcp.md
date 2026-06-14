@@ -56,6 +56,9 @@ docs/mcp.codex.example.toml
 | `cc_repair_mcp_paths` | 修复 `.mcp.json` 里的工作区和产物路径 |
 | `cc_folder_policy` | 返回或写入“只管理 Agent 产物”的目录策略 |
 | `cc_dashboard` | 生成本地 HTML 看板 |
+| `cc_controller_report` | 导出总控验收和压测证据报告 |
+| `cc_pressure_report` | `cc_controller_report` 的压测报告别名 |
+| `cc_decision_review` | 审查 Codex 总控决策，返回 approve/revise/block |
 
 ## 默认安全策略
 

@@ -6,6 +6,7 @@
     "development_strong": "auto:development",
     "review_strong": "auto:review",
     "security_strong": "auto:security",
+    "supervisor_strong": "auto:supervisor",
     "performance_strong": "auto:performance",
     "compatibility_stable": "auto:compatibility",
     "documentation_balanced": "auto:documentation",
@@ -51,6 +52,12 @@
       "permission_mode": "plan",
       "timeout_seconds": 600,
       "reason": "Highest local score for security review."
+    },
+    "supervisor": {
+      "profile_alias": "supervisor_strong",
+      "permission_mode": "plan",
+      "timeout_seconds": 600,
+      "reason": "Highest local score for Codex controller decision review."
     },
     "performance_review": {
       "profile_alias": "performance_strong",
@@ -100,6 +107,7 @@
     "architecture": "architecture",
     "development": "development",
     "security": "security_review",
+    "supervisor": "supervisor",
     "testing": "simple",
     "implementation": "complex_code",
     "review": "review",

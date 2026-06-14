@@ -2,6 +2,20 @@
 
 这里记录 Claude Code Orchestrator Skill 的主要版本变化。
 
+## v0.6.0 - 总控运维加固
+
+- 修复 GitHub issues #3-#12。
+- `spawn-role-team` 新增团队容量预检和部分启动回滚，避免失败后留下后台 worker。
+- streaming worker 新增输出/事件硬预算、final-only 模式和预算停止原因。
+- `send-instruction` 默认保留上一次 profile/model，并记录 route drift。
+- metadata、events、CLI JSON、dashboard 增加 UTF-8 和控制字符保护，中文路径/中文 prompt 更稳。
+- 风险结果拆成阻塞状态、警告、最高等级和兼容旧 `ok`。
+- 密钥扫描新增分类，输出只给脱敏证据。
+- diff 拆分项目源码改动和 `.agent-workspace` Agent 产物改动。
+- dashboard 升级成总控运维面板。
+- 新增 `controller-report` / `pressure-report` 和对应 MCP 报告工具。
+- 新增监督审查 `decision-review` / `cc_decision_review`。
+
 ## v0.5.1 - 便携资产和安全清理
 
 - 修复 GitHub issues #1 和 #2。

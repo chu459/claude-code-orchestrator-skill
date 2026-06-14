@@ -2,6 +2,20 @@
 
 This page tracks the public docs-facing history of Claude Code Orchestrator Skill.
 
+## v0.6.0 - Controller operations hardening
+
+- Fixed GitHub issues #3-#12.
+- Added transactional `spawn-role-team` capacity checks and rollback for partial launches.
+- Added hard output/event budgets, final-only mode, and output-budget stop reasons for streaming workers.
+- `send-instruction` now preserves the prior profile/model by default and reports route drift.
+- Added UTF-8 JSON/control-character safeguards for Chinese paths, prompts, metadata, and dashboard output.
+- Split risk semantics into blocking state, warnings, max severity, and compatibility `ok`.
+- Classified secret scan findings without printing raw secret values.
+- Split project source changes from `.agent-workspace` agent artifacts.
+- Upgraded the dashboard into a controller operations panel.
+- Added `controller-report` / `pressure-report` plus MCP report tools.
+- Added supervisor-style `decision-review` / `cc_decision_review`.
+
 ## v0.5.1 - Portable assets and safer cleanup
 
 - Fixed GitHub issues #1 and #2.

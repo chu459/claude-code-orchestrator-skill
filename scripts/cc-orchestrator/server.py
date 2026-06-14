@@ -23,10 +23,12 @@ from cc_orchestrator import (
     clean_workspace,
     collect_team_results,
     compact_events,
+    controller_report,
     cost_guard,
     cross_review,
     dashboard,
     daily_usage_summary,
+    decision_review,
     diff_summary,
     export_report,
     folder_policy,
@@ -117,6 +119,13 @@ class RunAgentInput(BaseModel):
 
 class RunStreamingAgentInput(RunAgentInput):
     include_partial_messages: bool = Field(default=True, description="Pass --include-partial-messages with stream-json output.")
+    max_output_bytes: Optional[int] = Field(default=None, ge=1, description="Hard stdout+stderr byte budget. Omit to use cost-guard defaults.")
+    max_events_bytes: Optional[int] = Field(default=None, ge=1, description="Hard events.ndjson byte budget. Omit to use cost-guard defaults.")
+    soft_output_bytes: Optional[int] = Field(default=None, ge=1, description="Warning threshold before the hard output budget.")
+    output_budget_policy: str = Field(default="stop", pattern="^(stop|truncate)$", description="What to do on hard budget exceed.")
+    kill_on_excessive_output: bool = Field(default=False, description="Alias for policy=stop when the hard budget is exceeded.")
+    final_only: bool = Field(default=False, description="Ask the worker to emit final-only output and suppress partial message events.")
+    final_max_chars: Optional[int] = Field(default=None, ge=1000, le=200000, description="Final-only answer character budget.")
 
 
 class PollRunInput(BaseModel):
@@ -183,6 +192,10 @@ class SendInstructionInput(BaseModel):
     role: Optional[str] = Field(default=None, description=ROLE_DESCRIPTION)
     task_type: Optional[str] = Field(default=None, description=TASK_TYPE_DESCRIPTION)
     timeout_seconds: Optional[int] = Field(default=None, ge=10, le=1800)
+    preserve_route: bool = Field(default=True, description="Preserve the previous profile/model by default.")
+    reroute: bool = Field(default=False, description="Allow the follow-up run to choose a new route.")
+    route_profile: Optional[str] = Field(default=None, description="Explicit profile for the restarted run.")
+    route_model: Optional[str] = Field(default=None, description="Explicit model override for the restarted run.")
 
 
 class SpawnRoleTeamInput(BaseModel):
@@ -459,6 +472,28 @@ class ExportReportInput(BaseModel):
     output_dir: Optional[str] = None
 
 
+class ControllerReportInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    run_id: Optional[str] = None
+    team_id: Optional[str] = None
+    date: Optional[str] = None
+    include_finished: bool = True
+    limit: int = Field(default=50, ge=1, le=500)
+    output_dir: Optional[str] = None
+
+
+class DecisionReviewInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    proposed_action: str = Field(..., min_length=1, max_length=12000)
+    task: str = Field(default="", max_length=20000)
+    run_id: Optional[str] = None
+    team_id: Optional[str] = None
+    evidence: Optional[str] = Field(default=None, max_length=20000)
+    output_dir: Optional[str] = None
+
+
 class LastRunInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
@@ -681,6 +716,13 @@ async def cc_run_streaming_agent(params: RunStreamingAgentInput) -> str:
             cwd=Path(params.cwd) if params.cwd else None,
             context=params.context,
             include_partial_messages=params.include_partial_messages,
+            max_output_bytes=params.max_output_bytes,
+            max_events_bytes=params.max_events_bytes,
+            soft_output_bytes=params.soft_output_bytes,
+            output_budget_policy=params.output_budget_policy,
+            kill_on_excessive_output=params.kill_on_excessive_output,
+            final_only=params.final_only,
+            final_max_chars=params.final_max_chars,
         )
         return _json(data)
     except Exception as exc:
@@ -785,7 +827,20 @@ async def cc_run_status(params: RunStatusInput) -> str:
 async def cc_send_instruction(params: SendInstructionInput) -> str:
     """Append an instruction by stopping a non-interactive run and restarting with recovered context."""
     try:
-        return _json(send_instruction(params.run_id, params.instruction, force=params.force, role=params.role, task_type=params.task_type, timeout_seconds=params.timeout_seconds))
+        return _json(
+            send_instruction(
+                params.run_id,
+                params.instruction,
+                force=params.force,
+                role=params.role,
+                task_type=params.task_type,
+                timeout_seconds=params.timeout_seconds,
+                preserve_route=params.preserve_route,
+                reroute=params.reroute,
+                route_profile=params.route_profile,
+                route_model=params.route_model,
+            )
+        )
     except Exception as exc:
         return _error(exc)
 
@@ -1103,6 +1158,60 @@ async def cc_export_report(params: ExportReportInput) -> str:
     """Export a run or team workflow as a Markdown report."""
     try:
         return _json(export_report(run_id=params.run_id, team_id=params.team_id, output_dir=Path(params.output_dir) if params.output_dir else None))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_controller_report", annotations={"title": "Export Controller Pressure Report", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False})
+async def cc_controller_report(params: ControllerReportInput) -> str:
+    """Export a Markdown report with run inventory, usage, risk, secret scan, dashboard path, and recommendations."""
+    try:
+        return _json(
+            controller_report(
+                run_id=params.run_id,
+                team_id=params.team_id,
+                date=params.date,
+                include_finished=params.include_finished,
+                limit=params.limit,
+                output_dir=Path(params.output_dir) if params.output_dir else None,
+            )
+        )
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_pressure_report", annotations={"title": "Export Pressure Test Report", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False})
+async def cc_pressure_report(params: ControllerReportInput) -> str:
+    """Alias of cc_controller_report for pressure-test acceptance reports."""
+    try:
+        return _json(
+            controller_report(
+                run_id=params.run_id,
+                team_id=params.team_id,
+                date=params.date,
+                include_finished=params.include_finished,
+                limit=params.limit,
+                output_dir=Path(params.output_dir) if params.output_dir else None,
+            )
+        )
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_decision_review", annotations={"title": "Review Codex Controller Decision", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False})
+async def cc_decision_review(params: DecisionReviewInput) -> str:
+    """Create a supervisor-style decision packet and return approve/revise/block guidance."""
+    try:
+        return _json(
+            decision_review(
+                task=params.task,
+                proposed_action=params.proposed_action,
+                run_id=params.run_id,
+                team_id=params.team_id,
+                evidence=params.evidence,
+                output_dir=Path(params.output_dir) if params.output_dir else None,
+            )
+        )
     except Exception as exc:
         return _error(exc)
 

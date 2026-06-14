@@ -1,10 +1,10 @@
 {
   "name": "claude-code-orchestrator-skill",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "schema_version": 2,
   "released_at": "2026-06-14",
   "notes": [
-    "Fixes workspace governance regressions: portable tools/cc-orchestrator asset discovery now finds version.json and prompt-pack, and clean-workspace preserves freshly initialized scaffold directories."
+    "Adds controller operations hardening for GitHub issues #3-#12: transactional role-team launch, hard output budgets, route-preserving follow-ups, Windows UTF-8 validation, risk/secret classification, source-vs-artifact diffs, operations dashboard, controller pressure reports, and supervisor decision review."
   ],
   "local_user_owned_files": [
     "scripts/cc-orchestrator/config/model_calibration.json",

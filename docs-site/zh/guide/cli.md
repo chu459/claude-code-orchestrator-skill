@@ -131,6 +131,9 @@ python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" compact-events --run-id <run_i
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" run-status
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" stop-run --run-id <run_id> --force
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" mock-stream-test
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" run-streaming "Noisy task" --role testing --max-output-bytes 200000 --kill-on-excessive-output
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" controller-report --limit 20
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" decision-review "accept worker result" --run-id <run_id> --evidence "verify-run passed"
 ```
 
 `poll-run` 默认是 controller 模式，会返回压缩进度、风险、改动文件、时间线、工具调用摘要和 checkpoint 路径。
