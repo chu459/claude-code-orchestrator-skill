@@ -85,7 +85,7 @@ Skill = Codex 的操作说明书
 
 | 版本 | 更新内容 | 为什么重要 |
 | --- | --- | --- |
-| `v0.6.2` | 修复 #15：捕获 Claude stream 里的 `modelUsage`，写成 `actual_model_usage`；metadata、dashboard、usage summary、控制报告都会区分“声明路由模型”和“实际计费模型”，并标出 `route_mismatch`。 | Codex 现在能发现“看起来派了 A 模型，实际 Claude 用了 B 模型”的坑。路由、账单、报告都更可信。 |
+| `v0.6.2` | 修复 #15：捕获 Claude stream 里的 `modelUsage`，写成 `actual_model_usage`；metadata、dashboard、usage summary、控制报告都会区分“声明路由模型”和“实际计费模型”，并标出 `route_mismatch`。新增 `supervise-decision`，作为 `decision-review` 的兼容别名。 | Codex 现在能发现“看起来派了 A 模型，实际 Claude 用了 B 模型”的坑。路由、账单、报告都更可信。 |
 | `v0.6.1` | 完成 GitHub issue 审核补丁：控制报告补齐按模型统计、每个 run 的耗时、token 估算、stdout/events 字节、warning/blocking 计数；dashboard 增加 token 估算；旧 metadata 写入也统一走 UTF-8/控制字符清洗。 | 这些 issue 不是“看起来关了”，而是能拿出更完整的验收证据。Codex 不用翻 raw 日志，也能判断 worker 到底跑得好不好。 |
 | `v0.6.0` | 修复 GitHub issues #3-#12：角色团队事务化启动、输出/事件硬预算、final-only 模式、追加指令保留原模型、Windows UTF-8 检查、风险等级拆分、密钥扫描分类、源码/Agent 产物分离、运维面板、控制报告、监督决策审查。 | Codex 现在更像真正的总控：团队不会半启动后偷偷留下 worker，输出跑飞会被停，模型路线不会悄悄漂移，风险和验收证据也能导出成报告。 |
 | `v0.5.1` | 修复 GitHub issues #1 和 #2：轻量 `tools/cc-orchestrator` 复制布局现在能找到 `version.json` 和 Prompt Pack；`clean-workspace` 不再提示删除刚初始化出来的骨架目录。 | 工作区治理更稳：轻量工具目录可以独立运行，清理命令也不会把初始化结果拆掉。 |
@@ -107,6 +107,7 @@ Skill = Codex 的操作说明书
 - `usage-summary` 优先按实际模型统计，同时保留声明模型字段。
 - dashboard 和控制报告会显示声明模型、实际模型、是否 mismatch、实际成本。
 - `healthcheck` 增加说明：实际模型以 Claude stream result 为准。
+- 新增 `supervise-decision`，作为 `decision-review` 的兼容别名，方便 #14 里的复测命令直接通过。
 
 </details>
 

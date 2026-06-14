@@ -6173,6 +6173,13 @@ def main() -> int:
     decision.add_argument("--team-id")
     decision.add_argument("--evidence")
     decision.add_argument("--output-dir")
+    supervise = sub.add_parser("supervise-decision")
+    supervise.add_argument("proposed_action")
+    supervise.add_argument("--task", default="")
+    supervise.add_argument("--run-id")
+    supervise.add_argument("--team-id")
+    supervise.add_argument("--evidence")
+    supervise.add_argument("--output-dir")
     visible = sub.add_parser("run-visible")
     visible.add_argument("task")
     visible.add_argument("--role", default="implementation")
@@ -6447,7 +6454,7 @@ def main() -> int:
                     output_dir=Path(args.output_dir) if args.output_dir else None,
                 )
             )
-        elif args.command == "decision-review":
+        elif args.command in {"decision-review", "supervise-decision"}:
             print_json(
                 decision_review(
                     task=args.task,

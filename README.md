@@ -65,7 +65,7 @@ This is a miniature cost-management operating system for multi-agent coding.
 
 | Version | What changed | Why it matters |
 | --- | --- | --- |
-| `v0.6.2` | Fixed #15: Claude stream `modelUsage` is captured as `actual_model_usage`; metadata, dashboard, usage summary, and controller reports now distinguish declared route from actual billed model and flag `route_mismatch`. | Codex can now catch the painful case where a worker says it used one model but Claude actually bills another. The controller sees the real model, real usage, and mismatch risk. |
+| `v0.6.2` | Fixed #15: Claude stream `modelUsage` is captured as `actual_model_usage`; metadata, dashboard, usage summary, and controller reports now distinguish declared route from actual billed model and flag `route_mismatch`. Added `supervise-decision` as a compatibility alias for `decision-review`. | Codex can now catch the painful case where a worker says it used one model but Claude actually bills another. The controller sees the real model, real usage, and mismatch risk. |
 | `v0.6.1` | Completed the GitHub issue audit pass: controller reports now include by-model totals, per-run duration, token estimates, stdout/events bytes, warning/blocking counts, and dashboard token estimates; legacy metadata writes now use the same UTF-8/control-character sanitizer. | The closed issues now have stronger evidence, not just feature names. Codex can hand you a report that is actually enough to judge worker health without opening raw logs. |
 | `v0.6.0` | Fixed GitHub issues #3-#12: transactional role-team launches, hard output/event budgets, final-only mode, route-preserving follow-ups, Windows UTF-8 checks, risk severity split, secret finding classification, source-vs-artifact diff summaries, operations dashboard, controller pressure reports, and supervisor decision review. | Codex can now manage Claude Code workers like a real controller: start teams without leaving silent workers behind, stop runaway output, preserve the chosen model, audit risk with clearer signals, and export acceptance evidence. |
 | `v0.5.1` | Fixed GitHub issues #1 and #2: portable `tools/cc-orchestrator` copies now discover `version.json` and Prompt Pack assets, and `clean-workspace` no longer suggests deleting freshly initialized scaffold folders. | Workspace governance is now safer and more portable: lightweight tool copies work, and cleanup does not undo initialization. |
@@ -87,6 +87,7 @@ This is a miniature cost-management operating system for multi-agent coding.
 - `usage-summary` groups by actual model when available while preserving declared model fields.
 - Dashboard and controller reports now show declared model, actual model, mismatch state, and actual cost.
 - `healthcheck` now documents that actual model attribution is verified from Claude stream results.
+- Added `supervise-decision` as a compatibility alias for `decision-review` so #14 retests pass either command name.
 
 </details>
 

@@ -8,6 +8,7 @@ This page tracks the public docs-facing history of Claude Code Orchestrator Skil
 - Added `actual_model`, `actual_cost_usd`, `actual_total_tokens`, and `route_mismatch` to run status and metadata.
 - `detect_failure_modes` now flags route mismatches as high-severity controller risks.
 - `usage-summary`, dashboard, and controller reports now distinguish declared route from actual billed model.
+- Added `supervise-decision` as a compatibility alias for `decision-review`.
 
 ## v0.6.1 - Issue audit completion
 

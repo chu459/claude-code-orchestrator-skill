@@ -8,6 +8,7 @@
 - run status 和 metadata 新增 `actual_model`、`actual_cost_usd`、`actual_total_tokens`、`route_mismatch`。
 - `detect_failure_modes` 会把路由不一致标成高风险。
 - `usage-summary`、dashboard、控制报告都会区分声明路由模型和实际计费模型。
+- 新增 `supervise-decision`，作为 `decision-review` 的兼容别名。
 
 ## v0.6.1 - issue 审核补丁
 
