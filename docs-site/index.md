@@ -13,7 +13,10 @@ hero:
       text: Get started
       link: /guide/getting-started
     - theme: alt
-      text: Chinese docs
+      text: Changelog
+      link: /changelog
+    - theme: alt
+      text: 简体中文
       link: /zh/
 
 features:
@@ -45,4 +48,4 @@ The core idea is simple:
 | MCP | Tool interface that Codex can call |
 | Run logs | The ledger for what each worker did |
 
-Start with [Get started](/guide/getting-started), then wire the [MCP server](/guide/mcp) and learn the [multi-agent strategy](/guide/multi-agent).
+Start with [Get started](/guide/getting-started), then wire the [MCP server](/guide/mcp), read the [changelog](/changelog), and learn the [multi-agent strategy](/guide/multi-agent).
