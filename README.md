@@ -27,6 +27,36 @@
 
 ---
 
+<h2 align="center">Plain-English Pitch</h2>
+
+GPT-class models are excellent.
+
+But Plus-level quotas are not infinite.
+
+If you spawn many internal subagents directly inside Codex, your best-model quota can disappear fast.
+
+A deep repo audit, a parallel multi-agent review, or one ambitious refactor can burn through the budget you wanted to save for judgment.
+
+That is why this Skill exists.
+
+The mission:
+
+> Make Plus feel like Pro.
+
+This Skill turns that constraint into an engineering system:
+
+> Let the best model act as the brain.
+> Let Claude Code plus your CCSwitch models act as hands.
+> Let Codex stay in control.
+
+In other words:
+
+> Codex does not need to do every low-level subtask itself.
+> Codex plans, routes, supervises, and verifies.
+> Claude Code executes through external worker models.
+
+This is a miniature cost-management operating system for multi-agent coding.
+
 <h2 align="center">Latest Updates</h2>
 
 <p align="center">
@@ -147,36 +177,6 @@
 - Added English and Chinese README foundation.
 
 </details>
-
-<h2 align="center">Plain-English Pitch</h2>
-
-GPT-class models are excellent.
-
-But Plus-level quotas are not infinite.
-
-If you spawn many internal subagents directly inside Codex, your best-model quota can disappear fast.
-
-A deep repo audit, a parallel multi-agent review, or one ambitious refactor can burn through the budget you wanted to save for judgment.
-
-That is why this Skill exists.
-
-The mission:
-
-> Make Plus feel like Pro.
-
-This Skill turns that constraint into an engineering system:
-
-> Let the best model act as the brain.  
-> Let Claude Code plus your CCSwitch models act as hands.  
-> Let Codex stay in control.
-
-In other words:
-
-> Codex does not need to do every low-level subtask itself.  
-> Codex plans, routes, supervises, and verifies.  
-> Claude Code executes through external worker models.
-
-This is a miniature cost-management operating system for multi-agent coding.
 
 <h2 align="center">What It Is</h2>
 
