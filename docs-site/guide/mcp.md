@@ -83,6 +83,9 @@ docs/mcp.codex.example.toml
 | `cc_dashboard` | Generates a local HTML dashboard |
 | `cc_open_run_folder` | Opens a run folder |
 | `cc_export_report` | Exports a run or team report |
+| `cc_controller_report` | Exports controller acceptance and pressure-report evidence |
+| `cc_pressure_report` | Alias for pressure-test report export |
+| `cc_decision_review` | Reviews a Codex controller decision and returns approve/revise/block |
 | `cc_run_visible_agent` | Opens a visible Claude Code worker window |
 | `cc_last_run` | Reads the latest run metadata and output tails |
 | `cc_git_diff` | Returns a capped git diff for review |

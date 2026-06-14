@@ -243,7 +243,12 @@ python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" diff --cwd "PROJECT_PATH"
 - Windows Chinese output is handled with UTF-8 stdio and child-process UTF-8 env. If a host still renders text strangely, rely on the UTF-8 files under `.agent-workspace/claude-code-orchestrator/runs/<run_id>/`.
 - Timeout output is preserved when the subprocess exposes partial stdout/stderr; use `last-run` to recover the tails.
 - For live control, prefer `run-streaming`: it uses Claude Code `stream-json`, writes `events.ndjson`, and enables `poll-run`, `run-status`, and `stop-run`.
+- For noisy or uncertain workers, set output budgets with `--max-output-bytes`, `--max-events-bytes`, `--kill-on-excessive-output`, or `--final-only`.
+- Treat `spawn-role-team` as transactional: if capacity is blocked or partial launch rollback occurs, inspect `runs`, `rollback`, and the team manifest before continuing.
+- `send-instruction` preserves the previous profile/model by default. Reroute only when Codex intentionally wants a new route.
 - For controller polling, prefer `poll-run --mode controller`. Raw `events.ndjson` stays on disk; Codex should usually read compact controller artifacts first.
+- Use `controller-report` / `pressure-report` after multi-agent or pressure runs to export acceptance evidence.
+- Use `decision-review` before high-impact accept, merge, or release decisions when evidence is thin or risk is nontrivial.
 - When Claude Code needs a stable persona, project rules, or role-specific worker behavior, write `CLAUDE.md` first with `write-claude-md` or MCP tool `cc_write_claude_md`, then run the sub-agent from that project cwd.
 - Before heavy multi-agent work in a project, run `init-workspace` or MCP `cc_init_workspace`. Keep agent logs, reports, dashboards, archives, rollback notes, templates, policies, and temp files under `.agent-workspace/claude-code-orchestrator`.
 - Use `folder-policy` or MCP `cc_folder_policy` to make the boundary explicit: manage agent-generated artifacts only; do not clean, archive, or migrate project source files.
@@ -271,6 +276,7 @@ Use the same role names through MCP:
 
 - `cc_pick_profile`, `cc_run_agent`, `cc_run_streaming_agent`, `cc_run_visible_agent`, and `cc_write_claude_md` accept `role`.
 - `cc_run_streaming_agent` starts a background Claude Code worker and writes `events.ndjson`.
+- `cc_run_streaming_agent` supports hard output/event budgets and final-only mode.
 - `cc_poll_run` defaults to controller mode: status, compact progress, risk flags, changed files, timeline, and attention signals. Use raw mode only when debugging.
 - `cc_compact_events` returns compact events plus deduplicated tool-call summaries.
 - `cc_poll_run` and `cc_summarize_run` write `progress_summary.json`, `latest_decision.md`, `risk_flags.json`, `changed_files.json`, `tool_timeline.md`, and rolling `checkpoints/checkpoint-###.md`.
@@ -278,7 +284,8 @@ Use the same role names through MCP:
 - `cc_stop_run` terminates a specific run id.
 - `cc_run_status` lists active workers or returns one run's status.
 - `cc_send_instruction` stops and restarts a non-interactive run with recovered context and a new instruction.
-- `cc_spawn_role_team` starts multiple role workers and writes a team manifest.
+- `cc_send_instruction` preserves route by default and reports route drift when rerouted.
+- `cc_spawn_role_team` starts multiple role workers transactionally and writes a team manifest.
 - `cc_collect_team_results` summarizes team outputs and marks repeated agreements plus explicit conflicts/risks.
 - `cc_cross_review` launches second-round reviewer workers over previous outputs.
 - `cc_preflight_write_scope` writes allowed/denied paths and max diff rules before write-enabled work.
@@ -309,8 +316,10 @@ Use the same role names through MCP:
 - `cc_dashboard` generates a local HTML worker dashboard.
 - `cc_open_run_folder` opens or returns a run log directory.
 - `cc_export_report` writes a Markdown report for a run or team.
-- `role` supports `requirements`, `development`, `testing`, `review`, `performance`, `compatibility`, `documentation`, `automation`, `security`, `ops`, plus `architecture`, `implementation`, and `multimodal`.
-- `task_type` supports `simple`, `normal`, `complex_code`, `development`, `review`, `security_review`, `performance_review`, `compatibility_review`, `documentation`, `automation`, `architecture`, `multimodal`, and `ops`.
+- `cc_controller_report` and `cc_pressure_report` export controller acceptance and pressure-test reports.
+- `cc_decision_review` returns supervisor-style approve/revise/block guidance for Codex controller decisions.
+- `role` supports `requirements`, `development`, `testing`, `review`, `performance`, `compatibility`, `documentation`, `automation`, `security`, `supervisor`, `ops`, plus `architecture`, `implementation`, and `multimodal`.
+- `task_type` supports `simple`, `normal`, `complex_code`, `development`, `review`, `security_review`, `supervisor`, `performance_review`, `compatibility_review`, `documentation`, `automation`, `architecture`, `multimodal`, and `ops`.
 - `cc_workflow_plan` returns `controller: codex`, `worker_roles`, and one route per configured role.
 - `cc_score_models` returns `role_scores` for all configured roles.
 - `cc_write_claude_md` embeds the selected role prompt and states that Codex is the controller.

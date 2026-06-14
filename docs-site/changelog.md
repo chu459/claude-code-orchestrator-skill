@@ -2,6 +2,36 @@
 
 This page tracks the public docs-facing history of Claude Code Orchestrator Skill.
 
+## v0.6.2 - Actual model attribution
+
+- Fixed #15 by recording Claude stream `modelUsage` as `actual_model_usage`.
+- Added `actual_model`, `actual_cost_usd`, `actual_total_tokens`, and `route_mismatch` to run status and metadata.
+- `detect_failure_modes` now flags route mismatches as high-severity controller risks.
+- `usage-summary`, dashboard, and controller reports now distinguish declared route from actual billed model.
+- Added `supervise-decision` as a compatibility alias for `decision-review`.
+
+## v0.6.1 - Issue audit completion
+
+- Expanded `controller-report` / `pressure-report` Markdown with by-model usage totals, total duration, token estimates, output bytes, event bytes, budget stops, warning counts, blocking counts, and max severity.
+- Added richer per-run report rows: duration, token estimate, stdout/events bytes, warning/blocking counts, budget state, and source/artifact counts.
+- Added token estimates to the dashboard output-budget panel.
+- Added warning/blocking risk counts to `usage-summary` and its by-model breakdown.
+- Routed remaining legacy metadata writes through the shared UTF-8/control-character sanitizer.
+
+## v0.6.0 - Controller operations hardening
+
+- Fixed GitHub issues #3-#12.
+- Added transactional `spawn-role-team` capacity checks and rollback for partial launches.
+- Added hard output/event budgets, final-only mode, and output-budget stop reasons for streaming workers.
+- `send-instruction` now preserves the prior profile/model by default and reports route drift.
+- Added UTF-8 JSON/control-character safeguards for Chinese paths, prompts, metadata, and dashboard output.
+- Split risk semantics into blocking state, warnings, max severity, and compatibility `ok`.
+- Classified secret scan findings without printing raw secret values.
+- Split project source changes from `.agent-workspace` agent artifacts.
+- Upgraded the dashboard into a controller operations panel.
+- Added `controller-report` / `pressure-report` plus MCP report tools.
+- Added supervisor-style `decision-review` / `cc_decision_review`.
+
 ## v0.5.1 - Portable assets and safer cleanup
 
 - Fixed GitHub issues #1 and #2.

@@ -15,7 +15,7 @@
 <p align="center">
   <a href="README.zh-CN.md"><img alt="README: 中文" src="https://img.shields.io/badge/README-中文-red"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-brightgreen"></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-v0.5.1-black">
+  <img alt="Version" src="https://img.shields.io/badge/version-v0.6.2-black">
   <img alt="Codex Skill" src="https://img.shields.io/badge/Codex-Skill-0A0A0A">
   <img alt="MCP Included" src="https://img.shields.io/badge/MCP-Included-blue">
   <img alt="CCSwitch" src="https://img.shields.io/badge/CCSwitch-Model_Router-purple">
@@ -60,11 +60,14 @@ This is a miniature cost-management operating system for multi-agent coding.
 <h2 align="center">Latest Updates</h2>
 
 <p align="center">
-  <b>Current version: v0.5.1</b>
+  <b>Current version: v0.6.2</b>
 </p>
 
 | Version | What changed | Why it matters |
 | --- | --- | --- |
+| `v0.6.2` | Fixed #15: Claude stream `modelUsage` is captured as `actual_model_usage`; metadata, dashboard, usage summary, and controller reports now distinguish declared route from actual billed model and flag `route_mismatch`. Added `supervise-decision` as a compatibility alias for `decision-review`. | Codex can now catch the painful case where a worker says it used one model but Claude actually bills another. The controller sees the real model, real usage, and mismatch risk. |
+| `v0.6.1` | Completed the GitHub issue audit pass: controller reports now include by-model totals, per-run duration, token estimates, stdout/events bytes, warning/blocking counts, and dashboard token estimates; legacy metadata writes now use the same UTF-8/control-character sanitizer. | The closed issues now have stronger evidence, not just feature names. Codex can hand you a report that is actually enough to judge worker health without opening raw logs. |
+| `v0.6.0` | Fixed GitHub issues #3-#12: transactional role-team launches, hard output/event budgets, final-only mode, route-preserving follow-ups, Windows UTF-8 checks, risk severity split, secret finding classification, source-vs-artifact diff summaries, operations dashboard, controller pressure reports, and supervisor decision review. | Codex can now manage Claude Code workers like a real controller: start teams without leaving silent workers behind, stop runaway output, preserve the chosen model, audit risk with clearer signals, and export acceptance evidence. |
 | `v0.5.1` | Fixed GitHub issues #1 and #2: portable `tools/cc-orchestrator` copies now discover `version.json` and Prompt Pack assets, and `clean-workspace` no longer suggests deleting freshly initialized scaffold folders. | Workspace governance is now safer and more portable: lightweight tool copies work, and cleanup does not undo initialization. |
 | `v0.5.0` | Added workspace governance: `.agent-workspace` artifact routing, `init-workspace`, `workspace-status`, `migrate-data`, `clean-workspace`, `archive-runs`, `repair-mcp-paths`, and `folder-policy`, with matching MCP tools. | Codex can now keep Claude Code worker logs, reports, dashboards, temp files, rollback notes, templates, and policies inside one managed folder without touching project source. |
 | `v0.4.1` | Added rolling `checkpoint-###.md` summaries, deduplicated tool-call summaries, default artifact-writing controller poll, and exact `queued/running/done/failed` queue states. | Codex can now inspect only decision-grade summaries while workers keep raw audit logs on disk. |
@@ -74,6 +77,47 @@ This is a miniature cost-management operating system for multi-agent coding.
 | `v0.1.0` | Built the first Skill + MCP + CLI foundation with CCSwitch profile discovery, model scoring, role routing, `CLAUDE.md` generation, visible Claude Code windows, logs, and safe defaults. | Proved the core idea: Codex is the brain, Claude Code is the worker layer, CCSwitch is the local model router. |
 
 <h3 align="center">Detailed Version Notes</h3>
+
+<details open>
+<summary><b>v0.6.2 - Actual Model Attribution</b></summary>
+
+- Fixed #15: streaming runs now persist Claude result `modelUsage` as `actual_model_usage`.
+- Added `actual_model`, `actual_cost_usd`, `actual_total_tokens`, and `route_mismatch` to run metadata/status.
+- `detect_failure_modes` now raises a high-severity `route_mismatch` flag when declared and actual models differ.
+- `usage-summary` groups by actual model when available while preserving declared model fields.
+- Dashboard and controller reports now show declared model, actual model, mismatch state, and actual cost.
+- `healthcheck` now documents that actual model attribution is verified from Claude stream results.
+- Added `supervise-decision` as a compatibility alias for `decision-review` so #14 retests pass either command name.
+
+</details>
+
+<details open>
+<summary><b>v0.6.1 - Issue Audit Completion</b></summary>
+
+- Expanded `controller-report` / `pressure-report` Markdown with by-model usage totals, duration, token estimates, output bytes, event bytes, budget stops, warning counts, blocking counts, and max severity.
+- Added per-run report rows with duration, token estimates, stdout/events bytes, warning/blocking counts, budget state, and source/artifact counts.
+- Added token estimates to the local operations dashboard output-budget panel.
+- Added warning/blocking risk counts to `usage-summary` and its by-model breakdown.
+- Routed remaining legacy metadata writes through the same UTF-8/control-character sanitizer used by streaming runs.
+
+</details>
+
+<details open>
+<summary><b>v0.6.0 - Controller Operations Hardening</b></summary>
+
+- Fixed #4: `spawn-role-team` now preflights team capacity and rolls back partial launches by stopping already-started runs.
+- Fixed #5: `run-streaming` / `cc_run_streaming_agent` now support `max_output_bytes`, `max_events_bytes`, `soft_output_bytes`, `output_budget_policy`, `kill_on_excessive_output`, `final_only`, and `final_max_chars`.
+- Fixed #6: `send-instruction` now preserves the previous profile/model by default and records route drift when rerouted.
+- Fixed #7: metadata, events, CLI JSON, and dashboard output now sanitize invalid control characters and preserve UTF-8 Chinese paths/prompts.
+- Fixed #8: risk flags now expose `blocking_ok`, `has_warnings`, `max_severity`, `warning_count`, and `blocking_count`; old `ok` remains compatible and means no blocking risk.
+- Fixed #9: secret scanning now classifies real candidates, placeholders/examples, identifiers, config key names, and unknown review items without printing raw secrets.
+- Fixed #10: run diffs and diff summaries now split project source changes from `.agent-workspace` agent artifacts.
+- Fixed #11: dashboard is now an operations panel with worker filters, heartbeat, stop reason, output budget, risk level, route drift, and source/artifact sections.
+- Fixed #12: added `controller-report` / `pressure-report` and MCP `cc_controller_report` / `cc_pressure_report` for acceptance-ready Markdown reports.
+- Added #3 MVP: `decision-review` and MCP `cc_decision_review` produce supervisor-style approve/revise/block reviews with evidence, objections, missing evidence, and required changes.
+- Expanded `mock-stream-test` to verify output-budget stopping without spending model quota.
+
+</details>
 
 <details open>
 <summary><b>v0.5.1 - Portable Assets and Safer Cleanup</b></summary>
@@ -462,6 +506,9 @@ python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" last-run
 | `cc_dashboard` | Generate a local HTML worker dashboard |
 | `cc_open_run_folder` | Open or return a run log folder |
 | `cc_export_report` | Export a run or team Markdown report |
+| `cc_controller_report` | Export controller acceptance and pressure-test evidence |
+| `cc_pressure_report` | Alias for pressure-test reports |
+| `cc_decision_review` | Supervisor-style approve/revise/block decision review |
 | `cc_run_visible_agent` | Open a visible Claude Code worker |
 | `cc_last_run` | Inspect last run |
 | `cc_git_diff` | Inspect git diff |

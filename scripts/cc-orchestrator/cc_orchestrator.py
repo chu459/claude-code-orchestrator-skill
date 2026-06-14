@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import html as html_lib
 import json
@@ -147,6 +148,11 @@ SECRET_VALUE_RE = re.compile(
 SECRET_ASSIGN_RE = re.compile(
     r"(?i)(?:api[_-]?key|secret|token|authorization|auth)\s*[:=]\s*['\"]?([A-Za-z0-9._~+/=\-]{16,})"
 )
+SECRET_NAME_RE = re.compile(r"(?i)\b(?:[A-Z0-9_]*(?:API[_-]?KEY|ACCESS[_-]?TOKEN|AUTH[_-]?TOKEN|SECRET|PASSWORD)[A-Z0-9_]*|authorization)\b")
+PLACEHOLDER_SECRET_RE = re.compile(
+    r"(?i)(example|placeholder|dummy|fake|test|mock|sample|your[_-]?|replace[_-]?me|changeme|xxx|xxxx|<[^>]+>|\$\{[^}]+})"
+)
+CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 RUN_ID_RE = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{8}$")
 TEAM_ID_RE = re.compile(r"^team-\d{8}T\d{6}Z-[0-9a-f]{8}$")
@@ -172,6 +178,7 @@ PASSTHROUGH_ENV_KEYS = {
     "CC_ORCHESTRATOR_ARTIFACT_ROOT",
     "CC_ORCHESTRATOR_FAKE_STEPS",
     "CC_ORCHESTRATOR_FAKE_DELAY",
+    "CC_ORCHESTRATOR_FAKE_PAYLOAD_BYTES",
     "LANG",
     "LC_ALL",
     "LC_CTYPE",
@@ -195,6 +202,7 @@ ROLE_ORDER = [
     "documentation",
     "automation",
     "security",
+    "supervisor",
     "implementation",
     "ops",
     "multimodal",
@@ -212,8 +220,19 @@ ROLE_SCORE_WEIGHTS: dict[str, dict[str, float]] = {
     "compatibility": {"stability": 0.25, "tool_use": 0.20, "code": 0.20, "long_context": 0.15, "reasoning": 0.15, "cost": 0.05},
     "documentation": {"long_context": 0.25, "reasoning": 0.20, "speed": 0.15, "tool_use": 0.15, "stability": 0.10, "code": 0.10, "cost": 0.05},
     "automation": {"tool_use": 0.25, "code": 0.25, "stability": 0.20, "reasoning": 0.15, "speed": 0.10, "cost": 0.05},
+    "supervisor": {"reasoning": 0.35, "long_context": 0.20, "stability": 0.20, "tool_use": 0.15, "code": 0.10},
     "ops": {"stability": 0.25, "tool_use": 0.20, "speed": 0.20, "reasoning": 0.15, "long_context": 0.10, "cost": 0.10},
     "multimodal": {"multimodal": 0.40, "tool_use": 0.20, "reasoning": 0.15, "code": 0.10, "long_context": 0.10, "stability": 0.05},
+}
+SEVERITY_ORDER = {"critical": 4, "high": 3, "medium": 2, "low": 1, "none": 0}
+BLOCKING_SEVERITIES = {"critical", "high"}
+OUTPUT_BUDGET_DEFAULTS = {
+    "max_output_bytes": 2_000_000,
+    "max_events_bytes": 2_000_000,
+    "soft_output_bytes": 1_000_000,
+    "policy": "stop",
+    "final_only": False,
+    "final_max_chars": 20000,
 }
 CONTROLLER_ARTIFACTS = {
     "progress_summary": "progress_summary.json",
@@ -921,7 +940,7 @@ def read_metadata(run_dir: Path) -> dict[str, Any]:
 
 
 def write_metadata(run_dir: Path, metadata: dict[str, Any]) -> None:
-    (run_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    (run_dir / "metadata.json").write_text(json.dumps(sanitize_for_json(metadata), ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def update_metadata(run_dir: Path, **updates: Any) -> dict[str, Any]:
@@ -1040,10 +1059,52 @@ def read_json_file(path: Path, default: Any) -> Any:
     return default
 
 
+def sanitize_for_json(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(sanitize_for_json(k)): sanitize_for_json(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [sanitize_for_json(item) for item in value]
+    if isinstance(value, tuple):
+        return [sanitize_for_json(item) for item in value]
+    if isinstance(value, str):
+        return CONTROL_CHAR_RE.sub("\uFFFD", value)
+    return value
+
+
 def write_json_file(path: Path, data: Any) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    path.write_text(json.dumps(sanitize_for_json(data), ensure_ascii=False, indent=2), encoding="utf-8")
     return path
+
+
+@contextlib.contextmanager
+def launch_lock(timeout_seconds: int = 15, stale_seconds: int = 60) -> Any:
+    RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    lock_dir = RUNS_DIR / ".launch.lock"
+    deadline = time.time() + timeout_seconds
+    while True:
+        try:
+            lock_dir.mkdir()
+            (lock_dir / "owner.json").write_text(
+                json.dumps({"pid": os.getpid(), "created_at": utc_now_iso()}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            break
+        except FileExistsError:
+            try:
+                age = time.time() - lock_dir.stat().st_mtime
+                if age > stale_seconds:
+                    shutil.rmtree(lock_dir, ignore_errors=True)
+                    continue
+            except OSError:
+                pass
+            if time.time() >= deadline:
+                raise OrchestratorError("Timed out waiting for the launch lock.")
+            time.sleep(0.1)
+    try:
+        yield
+    finally:
+        shutil.rmtree(lock_dir, ignore_errors=True)
 
 
 def snapshot_hashes(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -1241,7 +1302,7 @@ def append_event(run_dir: Path, event: dict[str, Any]) -> None:
     event.setdefault("run_id", run_dir.name)
     path = run_dir / "events.ndjson"
     with path.open("a", encoding="utf-8", errors="replace") as handle:
-        handle.write(json.dumps(redact(event), ensure_ascii=False) + "\n")
+        handle.write(json.dumps(sanitize_for_json(redact(event)), ensure_ascii=False) + "\n")
     seq_path.write_text(str(seq), encoding="utf-8")
 
 
@@ -1496,12 +1557,252 @@ def write_run_checkpoint(
     return {"written": True, "latest": item, "manifest_path": str(checkpoint_dir / "manifest.json")}
 
 
+def classify_change_paths(cwd: Path, files: list[str]) -> dict[str, Any]:
+    root = cwd.resolve()
+    artifact_root = workspace_paths(root)["artifact_root"].resolve()
+    project_paths: list[str] = []
+    artifact_paths: list[str] = []
+    other_paths: list[str] = []
+    for raw in files:
+        rel = str(raw).replace("\\", "/").strip("/")
+        if not rel:
+            continue
+        candidate = (root / rel).resolve()
+        if path_under(candidate, artifact_root):
+            artifact_paths.append(rel)
+        elif safe_relative(root, candidate) is not None:
+            project_paths.append(rel)
+        else:
+            other_paths.append(rel)
+    return {
+        "project_source_changes": {
+            "changed_count": len(project_paths),
+            "paths": project_paths,
+            "has_changes": bool(project_paths),
+        },
+        "agent_artifact_changes": {
+            "changed_count": len(artifact_paths),
+            "paths": artifact_paths,
+            "has_changes": bool(artifact_paths),
+            "artifact_root": str(artifact_root),
+        },
+        "outside_workspace_changes": {
+            "changed_count": len(other_paths),
+            "paths": other_paths,
+            "has_changes": bool(other_paths),
+        },
+    }
+
+
+def risk_summary(flags: list[dict[str, Any]]) -> dict[str, Any]:
+    normalized: list[dict[str, Any]] = []
+    max_severity = "none"
+    blocking_count = 0
+    warning_count = 0
+    for flag in flags:
+        item = dict(flag)
+        severity = str(item.get("severity") or "low").lower()
+        if severity not in SEVERITY_ORDER:
+            severity = "low"
+        item["severity"] = severity
+        item.setdefault("category", "runtime")
+        item.setdefault("confidence", "medium")
+        item["blocking"] = bool(item.get("blocking", severity in BLOCKING_SEVERITIES))
+        if SEVERITY_ORDER[severity] > SEVERITY_ORDER[max_severity]:
+            max_severity = severity
+        if item["blocking"]:
+            blocking_count += 1
+        elif severity != "none":
+            warning_count += 1
+        normalized.append(item)
+    return {
+        "ok": blocking_count == 0,
+        "blocking_ok": blocking_count == 0,
+        "has_warnings": warning_count > 0,
+        "max_severity": max_severity,
+        "warning_count": warning_count,
+        "blocking_count": blocking_count,
+        "flag_count": len(normalized),
+        "flags": sorted(normalized, key=lambda item: SEVERITY_ORDER.get(str(item.get("severity")), 0), reverse=True),
+        "needs_controller_attention": bool(normalized),
+    }
+
+
+def output_budget_from_metadata(metadata: dict[str, Any], run_dir: Path | None = None) -> dict[str, Any]:
+    budget = dict(OUTPUT_BUDGET_DEFAULTS)
+    budget.update(metadata.get("output_budget") or {})
+    if run_dir:
+        stdout_path = run_dir / "stdout.txt"
+        stderr_path = run_dir / "stderr.txt"
+        events_path = run_dir / "events.ndjson"
+        stdout_bytes = stdout_path.stat().st_size if stdout_path.exists() else 0
+        stderr_bytes = stderr_path.stat().st_size if stderr_path.exists() else 0
+        events_bytes = events_path.stat().st_size if events_path.exists() else 0
+        budget["stdout_bytes"] = stdout_bytes
+        budget["stderr_bytes"] = stderr_bytes
+        budget["observed_output_bytes"] = max(int(budget.get("observed_output_bytes") or 0), stdout_bytes + stderr_bytes)
+        budget["written_output_bytes"] = stdout_bytes + stderr_bytes
+        budget["events_bytes"] = events_bytes
+        if budget.get("state") in {None, ""}:
+            budget["state"] = "within_budget"
+        soft = budget.get("soft_output_bytes")
+        if soft and budget["observed_output_bytes"] > int(soft) and budget.get("state") == "within_budget":
+            budget["state"] = "soft_exceeded"
+    return budget
+
+
+def route_drift_summary(metadata: dict[str, Any]) -> dict[str, Any]:
+    profile = metadata.get("profile") or {}
+    drift = metadata.get("route_drift") or {}
+    previous_profile = drift.get("previous_profile") or metadata.get("previous_profile")
+    previous_model = drift.get("previous_model") or metadata.get("previous_model")
+    current_profile = profile.get("name")
+    current_model = profile.get("model")
+    changed = bool(drift.get("route_changed"))
+    if previous_profile or previous_model:
+        changed = changed or previous_profile != current_profile or previous_model != current_model
+    return {
+        "previous_profile": previous_profile,
+        "previous_model": previous_model,
+        "current_profile": current_profile,
+        "current_model": current_model,
+        "route_changed": changed,
+        "route_change_reason": drift.get("route_change_reason") or drift.get("reason") or "",
+    }
+
+
+def normalize_model_name(value: Any) -> str:
+    return re.sub(r"[^a-z0-9.]+", "", str(value or "").lower())
+
+
+def _number(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def extract_model_usage(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    candidates: list[Any] = [
+        payload.get("modelUsage"),
+        payload.get("model_usage"),
+    ]
+    usage = payload.get("usage")
+    if isinstance(usage, dict):
+        candidates.extend([usage.get("modelUsage"), usage.get("model_usage")])
+    message = payload.get("message")
+    if isinstance(message, dict):
+        candidates.extend([message.get("modelUsage"), message.get("model_usage"), message.get("model")])
+    for candidate in candidates:
+        if isinstance(candidate, dict) and candidate:
+            return candidate
+    return {}
+
+
+def extract_payload_model(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    for key in ("model", "actualModel", "actual_model"):
+        if payload.get(key):
+            return str(payload.get(key))
+    message = payload.get("message")
+    if isinstance(message, dict):
+        for key in ("model", "actualModel", "actual_model"):
+            if message.get(key):
+                return str(message.get(key))
+    usage = extract_model_usage(payload)
+    if usage:
+        ranked = sorted(
+            usage.items(),
+            key=lambda item: (
+                _number((item[1] or {}).get("costUSD") if isinstance(item[1], dict) else 0),
+                _number((item[1] or {}).get("inputTokens") if isinstance(item[1], dict) else 0)
+                + _number((item[1] or {}).get("outputTokens") if isinstance(item[1], dict) else 0),
+            ),
+            reverse=True,
+        )
+        if ranked:
+            return str(ranked[0][0])
+    return None
+
+
+def actual_route_from_payload(payload: Any, declared_model: Any = None) -> dict[str, Any]:
+    usage = extract_model_usage(payload)
+    actual_model = extract_payload_model(payload)
+    input_tokens = 0
+    output_tokens = 0
+    total_cost = 0.0
+    for item in usage.values():
+        if not isinstance(item, dict):
+            continue
+        input_tokens += int(_number(item.get("inputTokens") or item.get("input_tokens")))
+        output_tokens += int(_number(item.get("outputTokens") or item.get("output_tokens")))
+        total_cost += _number(item.get("costUSD") or item.get("cost_usd"))
+    declared = str(declared_model or "")
+    mismatch = bool(actual_model and declared and normalize_model_name(actual_model) != normalize_model_name(declared))
+    return {
+        "actual_model": actual_model,
+        "actual_model_usage": usage,
+        "actual_input_tokens": input_tokens,
+        "actual_output_tokens": output_tokens,
+        "actual_total_tokens": input_tokens + output_tokens if usage else None,
+        "actual_cost_usd": total_cost if usage else None,
+        "declared_model": declared or None,
+        "route_mismatch": mismatch,
+    }
+
+
+def actual_route_from_text(text: str, declared_model: Any = None) -> dict[str, Any]:
+    candidates = [text]
+    candidates.extend(reversed(text.splitlines()))
+    for candidate in candidates:
+        candidate = candidate.strip()
+        if not candidate:
+            continue
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        summary = actual_route_from_payload(payload, declared_model=declared_model)
+        if summary.get("actual_model") or summary.get("actual_model_usage"):
+            return summary
+    return actual_route_from_payload({}, declared_model=declared_model)
+
+
+def actual_route_summary(metadata: dict[str, Any]) -> dict[str, Any]:
+    profile = metadata.get("profile") or {}
+    declared_model = profile.get("model")
+    route = metadata.get("actual_route") or {}
+    actual_model = metadata.get("actual_model") or route.get("actual_model")
+    usage = metadata.get("actual_model_usage") or route.get("actual_model_usage") or {}
+    summary = {
+        "declared_profile": profile.get("name"),
+        "declared_model": declared_model,
+        "actual_model": actual_model,
+        "actual_model_usage": usage,
+        "actual_input_tokens": metadata.get("actual_input_tokens", route.get("actual_input_tokens")),
+        "actual_output_tokens": metadata.get("actual_output_tokens", route.get("actual_output_tokens")),
+        "actual_total_tokens": metadata.get("actual_total_tokens", route.get("actual_total_tokens")),
+        "actual_cost_usd": metadata.get("actual_cost_usd", route.get("actual_cost_usd")),
+    }
+    summary["route_mismatch"] = bool(
+        metadata.get("route_mismatch")
+        or route.get("route_mismatch")
+        or (actual_model and declared_model and normalize_model_name(actual_model) != normalize_model_name(declared_model))
+    )
+    return summary
+
+
 def changed_files_for_run(run_id: str) -> dict[str, Any]:
     run_dir = safe_run_dir(run_id)
     metadata = read_metadata(run_dir)
     before = metadata.get("git_before") or {}
     after = metadata.get("git_after") or {}
     files = changed_paths_between_snapshots(before, after) if before or after else []
+    cwd = Path(str(metadata.get("cwd") or Path.cwd()))
+    classified = classify_change_paths(cwd, files)
     return {
         "ok": True,
         "run_id": run_id,
@@ -1509,6 +1810,7 @@ def changed_files_for_run(run_id: str) -> dict[str, Any]:
         "source": "run_snapshots" if before or after else "none",
         "file_count": len(files),
         "files": files,
+        **classified,
     }
 
 
@@ -1536,55 +1838,69 @@ def detect_failure_modes(
     stderr_tail = tail_file(run_dir / "stderr.txt", chars=6000)
     merged_tail = f"{stdout_tail}\n{stderr_tail}"
     flags: list[dict[str, Any]] = []
+    metadata = read_metadata(run_dir)
 
     events = compact.get("items") or []
     last_event = events[-1] if events else {}
     last_age = _iso_age_seconds(str(last_event.get("ts") or "")) if last_event else None
     if status.get("active") and last_age is not None and last_age > 180:
-        flags.append({"code": "stalled", "severity": "medium", "message": f"No compact event for {int(last_age)} seconds."})
+        flags.append({"code": "stalled", "severity": "medium", "category": "liveness", "confidence": "medium", "message": f"No compact event for {int(last_age)} seconds."})
     if status.get("timed_out") or status.get("status") == "timed_out":
-        flags.append({"code": "timed_out", "severity": "high", "message": "Worker exceeded timeout."})
-    if int(status.get("stdout_bytes") or 0) + int(status.get("stderr_bytes") or 0) > 500_000:
-        flags.append({"code": "excessive_output", "severity": "medium", "message": "Run produced more than 500 KB of output."})
+        flags.append({"code": "timed_out", "severity": "high", "category": "liveness", "confidence": "high", "message": "Worker exceeded timeout."})
+    output_budget = output_budget_from_metadata(metadata, run_dir)
+    if str(output_budget.get("state")) in {"stopped", "truncated"}:
+        flags.append({"code": "output_budget_exceeded", "severity": "high", "category": "output_budget", "confidence": "high", "message": f"Output budget policy triggered: {output_budget.get('stop_reason') or output_budget.get('state')}.", "output_budget": output_budget})
+    elif int(output_budget.get("observed_output_bytes") or 0) > int(output_budget.get("soft_output_bytes") or 500_000):
+        flags.append({"code": "excessive_output", "severity": "medium", "blocking": False, "category": "output_budget", "confidence": "high", "message": "Run produced more than the configured soft output budget.", "output_budget": output_budget})
 
     search_lines = [event for event in events if FAILURE_PATTERNS["repeated_search"].search(str(event.get("text") or ""))]
     if len(search_lines) >= 8:
-        flags.append({"code": "repeated_search", "severity": "medium", "message": "Many recent events look like repeated search/listing work."})
+        flags.append({"code": "repeated_search", "severity": "medium", "blocking": False, "category": "efficiency", "confidence": "medium", "message": "Many recent events look like repeated search/listing work."})
 
     if FAILURE_PATTERNS["permission_risk"].search(merged_tail):
-        flags.append({"code": "destructive_command_risk", "severity": "high", "message": "Output mentions a potentially destructive shell command."})
+        flags.append({"code": "destructive_command_risk", "severity": "high", "category": "safety", "confidence": "medium", "message": "Output mentions a potentially destructive shell command."})
 
     if FAILURE_PATTERNS["test_failed"].search(merged_tail) and FAILURE_PATTERNS["claimed_success"].search(merged_tail):
-        flags.append({"code": "success_claim_after_test_failure", "severity": "high", "message": "Output appears to claim success while also containing test failure text."})
+        flags.append({"code": "success_claim_after_test_failure", "severity": "high", "category": "quality", "confidence": "medium", "message": "Output appears to claim success while also containing test failure text."})
+
+    actual_route = actual_route_summary(metadata)
+    if actual_route.get("route_mismatch"):
+        flags.append(
+            {
+                "code": "route_mismatch",
+                "severity": "high",
+                "category": "routing",
+                "confidence": "high",
+                "message": "Declared route model differs from Claude stream modelUsage.",
+                "declared_model": actual_route.get("declared_model"),
+                "actual_model": actual_route.get("actual_model"),
+            }
+        )
 
     try:
         scope = check_write_scope(run_id=run_id)
         if not scope.get("ok", True):
-            flags.append({"code": "write_scope_violation", "severity": "high", "message": "Changed files violate the preflight write scope.", "violations": scope.get("violations", [])})
+            flags.append({"code": "write_scope_violation", "severity": "high", "category": "scope", "confidence": "high", "message": "Changed files violate the preflight write scope.", "violations": scope.get("violations", [])})
     except Exception as exc:
-        flags.append({"code": "write_scope_unknown", "severity": "low", "message": str(exc)})
+        flags.append({"code": "write_scope_unknown", "severity": "low", "blocking": False, "category": "scope", "confidence": "low", "message": str(exc)})
 
     try:
         scan = secret_scan_run(run_id, include_diff=False)
-        if scan.get("finding_count"):
-            flags.append({"code": "possible_secret_output", "severity": "critical", "message": "Run logs may contain credentials.", "finding_count": scan.get("finding_count")})
+        if scan.get("blocking_count"):
+            flags.append({"code": "possible_secret_output", "severity": scan.get("max_severity") or "critical", "category": "secret", "confidence": "high", "message": "Run logs may contain credential-like values.", "finding_count": scan.get("finding_count"), "classification_counts": scan.get("classification_counts")})
+        elif scan.get("finding_count"):
+            flags.append({"code": "secret_scan_warnings", "severity": "low", "blocking": False, "category": "secret", "confidence": "medium", "message": "Secret scan found only placeholder or identifier-like warnings.", "finding_count": scan.get("finding_count"), "classification_counts": scan.get("classification_counts")})
     except Exception as exc:
-        flags.append({"code": "secret_scan_unknown", "severity": "low", "message": str(exc)})
+        flags.append({"code": "secret_scan_unknown", "severity": "low", "blocking": False, "category": "secret", "confidence": "low", "message": str(exc)})
 
     watched = {".env", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "uv.lock"}
-    unrelated = [path for path in changed_files.get("files", []) if Path(path).name in watched]
+    source_paths = (changed_files.get("project_source_changes") or {}).get("paths") or changed_files.get("files", [])
+    unrelated = [path for path in source_paths if Path(path).name in watched]
     if unrelated:
-        flags.append({"code": "sensitive_file_changed", "severity": "medium", "message": "Worker changed sensitive or lock/config files.", "files": unrelated})
+        flags.append({"code": "sensitive_file_changed", "severity": "medium", "blocking": False, "category": "source_change", "confidence": "medium", "message": "Worker changed sensitive or lock/config files.", "files": unrelated})
 
-    severity_order = {"critical": 4, "high": 3, "medium": 2, "low": 1}
-    flags.sort(key=lambda item: severity_order.get(str(item.get("severity")), 0), reverse=True)
-    return {
-        "ok": not any(str(flag.get("severity")) in {"critical", "high"} for flag in flags),
-        "run_id": run_id,
-        "flag_count": len(flags),
-        "flags": flags,
-        "needs_controller_attention": bool(flags),
-    }
+    summary = risk_summary(flags)
+    return {"run_id": run_id, **summary}
 
 
 def controller_recommendation(status: dict[str, Any], risks: dict[str, Any]) -> str:
@@ -1638,7 +1954,12 @@ def progress_summary_for_run(
         "recent_tools": tool_names[-10:],
         "changed_file_count": changed_files.get("file_count", 0),
         "changed_files": changed_files.get("files", [])[:50],
+        "project_source_changes": changed_files.get("project_source_changes"),
+        "agent_artifact_changes": changed_files.get("agent_artifact_changes"),
         "risk_flag_count": risks.get("flag_count", 0),
+        "risk_blocking_ok": risks.get("blocking_ok", risks.get("ok")),
+        "risk_has_warnings": risks.get("has_warnings", False),
+        "risk_max_severity": risks.get("max_severity", "none"),
         "controller_attention_flags": risks.get("flags", []),
         "needs_controller_attention": risks.get("needs_controller_attention", False),
         "recommended_action": controller_recommendation(status, risks),
@@ -2135,7 +2456,10 @@ def healthcheck() -> dict[str, Any]:
     try:
         profiles = list_profiles()
         result["profile_count"] = len(profiles)
-        result["current_profile"] = next((p["name"] for p in profiles if p["current"]), None)
+        current = next((p for p in profiles if p.get("current")), None)
+        result["current_profile"] = current.get("name") if current else None
+        result["current_profile_model"] = current.get("model") if current else None
+        result["actual_model_usage_note"] = "Streaming runs record Claude result modelUsage as actual_model_usage and flag route_mismatch when it differs from the declared route."
     except Exception as exc:
         result["ok"] = False
         result["profiles_error"] = str(exc)
@@ -2290,7 +2614,7 @@ def run_agent(
         "command": redact(cmd),
     }
     metadata["git_before"] = capture_git_snapshot(run_dir, effective_cwd, "before")
-    (run_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_metadata(run_dir, metadata)
     (run_dir / "prompt.txt").write_text(safe_prompt, encoding="utf-8")
     try:
         proc = subprocess.run(
@@ -2317,6 +2641,7 @@ def run_agent(
     safe_stderr = redact(stderr)
     (run_dir / "stdout.txt").write_text(str(safe_stdout), encoding="utf-8")
     (run_dir / "stderr.txt").write_text(str(safe_stderr), encoding="utf-8")
+    actual_route = actual_route_from_text(str(stdout), declared_model=(metadata.get("profile") or {}).get("model"))
     metadata.update(
         {
             "finished_at": datetime.now(timezone.utc).isoformat(),
@@ -2328,11 +2653,24 @@ def run_agent(
             "git_after": capture_git_snapshot(run_dir, effective_cwd, "after"),
         }
     )
-    (run_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    if actual_route.get("actual_model") or actual_route.get("actual_model_usage"):
+        metadata.update(
+            {
+                "actual_route": actual_route,
+                "actual_model": actual_route.get("actual_model"),
+                "actual_model_usage": actual_route.get("actual_model_usage"),
+                "actual_input_tokens": actual_route.get("actual_input_tokens"),
+                "actual_output_tokens": actual_route.get("actual_output_tokens"),
+                "actual_total_tokens": actual_route.get("actual_total_tokens"),
+                "actual_cost_usd": actual_route.get("actual_cost_usd"),
+                "route_mismatch": actual_route.get("route_mismatch"),
+            }
+        )
+    write_metadata(run_dir, metadata)
     scope_check = check_write_scope(run_id=run_id)
     metadata["write_scope_check"] = scope_check
     metadata["acceptance_status"] = "blocked_write_scope" if not scope_check.get("ok", True) else "pending_controller_review"
-    (run_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_metadata(run_dir, metadata)
     latest_path = RUNS_DIR / "latest.txt"
     latest_path.write_text(run_id, encoding="utf-8")
     return {
@@ -2347,12 +2685,21 @@ def run_streaming_agent(
     role: str = "implementation",
     task_type: str | None = None,
     profile: str | None = None,
+    model_override: str | None = None,
     allow_write: bool = False,
     timeout_seconds: int | None = None,
     cwd: Path | None = None,
     context: str | None = None,
     output_format: str = "stream-json",
     include_partial_messages: bool = True,
+    max_output_bytes: int | None = None,
+    max_events_bytes: int | None = None,
+    soft_output_bytes: int | None = None,
+    output_budget_policy: str | None = None,
+    kill_on_excessive_output: bool = False,
+    final_only: bool = False,
+    final_max_chars: int | None = None,
+    skip_cost_guard: bool = False,
 ) -> dict[str, Any]:
     """Start Claude Code in the background and stream events to events.ndjson."""
     if not task.strip():
@@ -2365,9 +2712,30 @@ def run_streaming_agent(
     permission_mode = route["permission_mode"] if not write_enabled else "acceptEdits"
     timeout = timeout_seconds or int(route["timeout_seconds"])
     timeout = min(timeout, int(policy.get("safety", {}).get("max_timeout_seconds", 1800)))
-    timeout = enforce_cost_guard(route.get("model_override") or provider.model, timeout)
+    selected_model = model_override or route.get("model_override") or provider.model
+    timeout = clamp_timeout_for_model(selected_model, timeout) if skip_cost_guard else timeout
     if output_format != "stream-json":
         raise OrchestratorError("run_streaming_agent requires output_format='stream-json'.")
+    budget = resolve_output_budget(
+        max_output_bytes=max_output_bytes,
+        max_events_bytes=max_events_bytes,
+        soft_output_bytes=soft_output_bytes,
+        output_budget_policy=output_budget_policy,
+        kill_on_excessive_output=kill_on_excessive_output,
+        final_only=final_only,
+        final_max_chars=final_max_chars,
+    )
+    if budget.get("final_only"):
+        include_partial_messages = False
+        final_rules = "\n".join(
+            [
+                "Final-only output mode is enabled.",
+                "Return only essential final findings, changed files, verification, and blockers.",
+                "Do not stream exploratory narration or repeated progress logs.",
+                f"Keep the final answer under {budget.get('final_max_chars')} characters.",
+            ]
+        )
+        context = "\n\n".join(part for part in [context or "", final_rules] if part)
 
     run_id = new_run_id()
     run_dir = RUNS_DIR / run_id
@@ -2396,16 +2764,26 @@ def run_streaming_agent(
         "profile": {
             "id": provider.id,
             "name": provider.name,
-            "model": route.get("model_override") or provider.model,
+            "model": selected_model,
             "provider_default_model": provider.model,
             "base_url": provider.env.get("ANTHROPIC_BASE_URL"),
             "endpoints": provider.endpoints,
+        },
+        "route": {
+            "profile": provider.name,
+            "model": selected_model,
+            "profile_id": provider.id,
+            "task_type": route["task_type"],
+            "reason": route.get("reason", ""),
+            "model_override": model_override or route.get("model_override"),
         },
         "permission_mode": permission_mode,
         "allow_write": write_enabled,
         "timeout_seconds": timeout,
         "output_format": output_format,
         "include_partial_messages": include_partial_messages,
+        "output_budget": budget,
+        "stop_reason": None,
         "prompt_sha256": prompt_hash,
         "route_reason": route.get("reason", ""),
         "prompt_path": str(prompt_path),
@@ -2419,7 +2797,7 @@ def run_streaming_agent(
     write_metadata(run_dir, metadata)
     append_event(run_dir, {"type": "run_started", "status": "starting", "role": role, "task_type": route["task_type"]})
 
-    env = build_worker_env(provider.env, route.get("model_override"))
+    env = build_worker_env(provider.env, selected_model if selected_model != provider.model else route.get("model_override"))
     worker_cmd = [sys.executable, "-B", str(Path(__file__).resolve()), "_stream-worker", "--run-id", run_id]
     creationflags = 0
     popen_kwargs: dict[str, Any] = {}
@@ -2427,16 +2805,21 @@ def run_streaming_agent(
         creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
     else:
         popen_kwargs["start_new_session"] = True
-    worker = subprocess.Popen(
-        worker_cmd,
-        cwd=str(ROOT),
-        env=env,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=creationflags,
-        **popen_kwargs,
-    )
+    with (contextlib.nullcontext() if skip_cost_guard else launch_lock()):
+        if not skip_cost_guard:
+            timeout = enforce_cost_guard(selected_model, timeout)
+            metadata["timeout_seconds"] = timeout
+            write_metadata(run_dir, metadata)
+        worker = subprocess.Popen(
+            worker_cmd,
+            cwd=str(ROOT),
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=creationflags,
+            **popen_kwargs,
+        )
     metadata.update({"worker_pid": worker.pid, "worker_command": redact(worker_cmd)})
     write_metadata(run_dir, metadata)
     append_event(run_dir, {"type": "stream_worker_started", "worker_pid": worker.pid})
@@ -2507,33 +2890,168 @@ def stream_worker(run_id: str) -> dict[str, Any]:
     (run_dir / "pid.txt").write_text(str(proc.pid), encoding="utf-8")
     append_event(run_dir, {"type": "process_started", "pid": proc.pid, "status": "running"})
     event_lock = threading.Lock()
+    budget_lock = threading.Lock()
+    budget = output_budget_from_metadata(metadata, run_dir)
+    budget_stop = threading.Event()
+    actual_route_recorded = threading.Event()
+    route_mismatch_recorded = threading.Event()
+
+    def persist_budget_unlocked(stop_reason: str | None = None) -> None:
+        latest = read_metadata(run_dir)
+        latest["output_budget"] = dict(budget)
+        if stop_reason:
+            latest["stop_reason"] = stop_reason
+        write_metadata(run_dir, latest)
+
+    def trigger_budget(reason: str, source: str) -> None:
+        with budget_lock:
+            if budget.get("state") in {"stopped", "truncated"}:
+                return
+            policy_name = str(budget.get("policy") or "stop")
+            budget["state"] = "truncated" if policy_name == "truncate" else "stopped"
+            budget["stop_reason"] = reason
+            budget["triggered_at"] = utc_now_iso()
+            budget["triggered_by"] = source
+            try:
+                budget["events_bytes"] = (run_dir / "events.ndjson").stat().st_size
+            except OSError:
+                pass
+            persist_budget_unlocked(reason)
+            if policy_name == "stop":
+                budget_stop.set()
+        try:
+            append_event(run_dir, {"type": "output_budget_exceeded", "reason": reason, "source": source, "policy": budget.get("policy"), "output_budget": budget})
+        except Exception:
+            pass
+
+    def event_is_final_or_control(event: dict[str, Any]) -> bool:
+        if not budget.get("final_only"):
+            return True
+        payload = event.get("payload")
+        if event.get("type") in {"run_started", "process_started", "process_exited", "output_budget_exceeded", "timeout", "stream_worker_ready", "actual_model_usage", "route_mismatch"}:
+            return True
+        if isinstance(payload, dict):
+            event_type = str(payload.get("type") or "")
+            subtype = str(payload.get("subtype") or "")
+            if event_type in {"result", "system"} or subtype in {"success", "error"}:
+                return True
+        return False
 
     def safe_append(event: dict[str, Any]) -> None:
+        if not event_is_final_or_control(event):
+            with budget_lock:
+                budget["dropped_event_count"] = int(budget.get("dropped_event_count") or 0) + 1
+            return
+        encoded = (json.dumps(sanitize_for_json(redact(event)), ensure_ascii=False) + "\n").encode("utf-8", errors="replace")
+        max_events = budget.get("max_events_bytes")
+        events_path = run_dir / "events.ndjson"
         with event_lock:
+            current_events = events_path.stat().st_size if events_path.exists() else 0
+            if max_events and current_events + len(encoded) > int(max_events):
+                with budget_lock:
+                    budget["events_bytes"] = current_events
+                    budget["dropped_event_count"] = int(budget.get("dropped_event_count") or 0) + 1
+                    persist_budget_unlocked("events_budget_exceeded")
+                trigger_budget("events_budget_exceeded", str(event.get("source") or event.get("type") or "events"))
+                return
             append_event(run_dir, event)
+            with budget_lock:
+                budget["events_bytes"] = events_path.stat().st_size if events_path.exists() else current_events + len(encoded)
+
+    def record_actual_route(payload: Any) -> None:
+        declared_model = (metadata.get("profile") or {}).get("model")
+        summary = actual_route_from_payload(payload, declared_model=declared_model)
+        if not summary.get("actual_model") and not summary.get("actual_model_usage"):
+            return
+        update_metadata(
+            run_dir,
+            actual_route=summary,
+            actual_model=summary.get("actual_model"),
+            actual_model_usage=summary.get("actual_model_usage"),
+            actual_input_tokens=summary.get("actual_input_tokens"),
+            actual_output_tokens=summary.get("actual_output_tokens"),
+            actual_total_tokens=summary.get("actual_total_tokens"),
+            actual_cost_usd=summary.get("actual_cost_usd"),
+            route_mismatch=summary.get("route_mismatch"),
+        )
+        if not actual_route_recorded.is_set():
+            actual_route_recorded.set()
+            safe_append(
+                {
+                    "type": "actual_model_usage",
+                    "declared_model": summary.get("declared_model"),
+                    "actual_model": summary.get("actual_model"),
+                    "actual_total_tokens": summary.get("actual_total_tokens"),
+                    "actual_cost_usd": summary.get("actual_cost_usd"),
+                    "route_mismatch": summary.get("route_mismatch"),
+                }
+            )
+        if summary.get("route_mismatch") and not route_mismatch_recorded.is_set():
+            route_mismatch_recorded.set()
+            safe_append(
+                {
+                    "type": "route_mismatch",
+                    "severity": "high",
+                    "declared_model": summary.get("declared_model"),
+                    "actual_model": summary.get("actual_model"),
+                    "message": "Claude stream modelUsage does not match the orchestrator-declared route model.",
+                }
+            )
 
     def pump(stream: Any, out_path: Path, source: str) -> None:
         try:
             with out_path.open("a", encoding="utf-8", errors="replace") as out:
                 for line in iter(stream.readline, ""):
+                    raw_bytes = len(line.encode("utf-8", errors="replace"))
+                    write_line = True
+                    with budget_lock:
+                        observed = int(budget.get("observed_output_bytes") or 0) + raw_bytes
+                        budget["observed_output_bytes"] = observed
+                        soft = budget.get("soft_output_bytes")
+                        if soft and observed > int(soft) and budget.get("state") == "within_budget":
+                            budget["state"] = "soft_exceeded"
+                            budget["triggered_at"] = utc_now_iso()
+                            budget["triggered_by"] = source
+                            persist_budget_unlocked()
+                        hard = budget.get("max_output_bytes")
+                        if hard and observed > int(hard):
+                            budget["dropped_output_bytes"] = int(budget.get("dropped_output_bytes") or 0) + raw_bytes
+                            write_line = False
+                    if not write_line:
+                        trigger_budget("output_budget_exceeded", source)
+                        if str(budget.get("policy") or "stop") == "stop":
+                            break
+                        continue
                     safe_line = str(redact(line))
-                    out.write(safe_line)
-                    out.flush()
                     if source == "stdout":
                         try:
-                            payload: Any = redact(json.loads(line))
-                            event_type = "claude_stream"
+                            parsed_payload: Any = redact(json.loads(line))
+                            parsed_event_type = "claude_stream"
                         except json.JSONDecodeError:
-                            payload = {"text": safe_line.rstrip("\r\n")}
-                            event_type = "stdout"
+                            parsed_payload = {"text": safe_line.rstrip("\r\n")}
+                            parsed_event_type = "stdout"
                     else:
-                        payload = {"text": safe_line.rstrip("\r\n")}
-                        event_type = "stderr"
+                        parsed_payload = {"text": safe_line.rstrip("\r\n")}
+                        parsed_event_type = "stderr"
+                    if source == "stdout" and isinstance(parsed_payload, dict):
+                        record_actual_route(parsed_payload)
+                    if budget.get("final_only") and not event_is_final_or_control({"type": parsed_event_type, "source": source, "payload": parsed_payload}):
+                        with budget_lock:
+                            budget["dropped_output_bytes"] = int(budget.get("dropped_output_bytes") or 0) + raw_bytes
+                        continue
+                    out.write(safe_line)
+                    out.flush()
+                    with budget_lock:
+                        budget["written_output_bytes"] = int(budget.get("written_output_bytes") or 0) + len(safe_line.encode("utf-8", errors="replace"))
+                    payload = parsed_payload
+                    event_type = parsed_event_type
                     phase = extract_event_phase(payload, source)
                     event = {"type": event_type, "source": source, "payload": payload}
                     if phase:
                         event["phase"] = phase
                     safe_append(event)
+                    if budget_stop.is_set():
+                        break
         except Exception as exc:
             safe_append({"type": "stream_pump_error", "source": source, "error": str(exc)})
 
@@ -2555,9 +3073,17 @@ def stream_worker(run_id: str) -> dict[str, Any]:
             if (run_dir / "stop-requested.json").exists():
                 stopped = True
                 terminate_process_tree(proc.pid, force=False, wait_seconds=5)
+            if budget_stop.is_set():
+                stopped = True
+                terminate_process_tree(proc.pid, force=False, wait_seconds=5)
+                if pid_alive(proc.pid):
+                    terminate_process_tree(proc.pid, force=True, wait_seconds=2)
             if time.time() - started > timeout:
                 timed_out = True
                 safe_append({"type": "timeout", "timeout_seconds": timeout})
+                with budget_lock:
+                    budget["stop_reason"] = "timeout"
+                    persist_budget_unlocked("timeout")
                 terminate_process_tree(proc.pid, force=False, wait_seconds=5)
                 if pid_alive(proc.pid):
                     terminate_process_tree(proc.pid, force=True, wait_seconds=2)
@@ -2583,6 +3109,11 @@ def stream_worker(run_id: str) -> dict[str, Any]:
     else:
         final_exit = 0 if exit_code is None else exit_code
         status = "succeeded" if final_exit == 0 else "failed"
+    with budget_lock:
+        budget.update(output_budget_from_metadata({"output_budget": budget}, run_dir))
+        if stopped and not budget.get("stop_reason"):
+            budget["stop_reason"] = "user_requested"
+        persist_budget_unlocked(str(budget.get("stop_reason") or "") or None)
     final_metadata = update_metadata(
         run_dir,
         status=status,
@@ -2593,6 +3124,8 @@ def stream_worker(run_id: str) -> dict[str, Any]:
         stdout_path=str(run_dir / "stdout.txt"),
         stderr_path=str(run_dir / "stderr.txt"),
         events_path=str(run_dir / "events.ndjson"),
+        output_budget=budget,
+        stop_reason=budget.get("stop_reason") or ("timeout" if timed_out else "user_requested" if stopped else None),
         git_after=capture_git_snapshot(run_dir, cwd, "after"),
     )
     scope_check = check_write_scope(run_id=run_id)
@@ -2625,6 +3158,8 @@ def single_run_status(run_id: str, include_output_tail: bool = True, tail_chars:
                 status = "timed_out"
             else:
                 status = "succeeded" if exit_code == 0 else "failed"
+        elif metadata.get("stop_reason") in {"output_budget_exceeded", "events_budget_exceeded", "user_requested"}:
+            status = "stopped"
         else:
             status = "lost"
     started_at = metadata.get("started_at")
@@ -2650,6 +3185,16 @@ def single_run_status(run_id: str, include_output_tail: bool = True, tail_chars:
     event_summary = summarize_events(events)
     stdout_tail = tail_file(stdout_path, chars=tail_chars)
     stderr_tail = tail_file(stderr_path, chars=min(tail_chars, 2000))
+    stdout_bytes = stdout_path.stat().st_size if stdout_path.exists() else 0
+    stderr_bytes = stderr_path.stat().st_size if stderr_path.exists() else 0
+    events_bytes = events_path.stat().st_size if events_path.exists() else 0
+    prompt_path = run_dir / "prompt.txt"
+    prompt_text = prompt_path.read_text(encoding="utf-8", errors="replace") if prompt_path.exists() else ""
+    input_tokens_est = max(0, int(len(prompt_text) / 4))
+    output_tokens_est = max(0, int((stdout_bytes + stderr_bytes) / 4))
+    output_budget = output_budget_from_metadata(metadata, run_dir)
+    route_drift = route_drift_summary(metadata)
+    actual_route = actual_route_summary(metadata)
     result = {
         "ok": True,
         "run_id": run_id,
@@ -2664,14 +3209,25 @@ def single_run_status(run_id: str, include_output_tail: bool = True, tail_chars:
         "elapsed_ms": elapsed_ms,
         "exit_code": metadata.get("exit_code"),
         "timed_out": bool(metadata.get("timed_out", False)),
+        "stop_reason": metadata.get("stop_reason") or output_budget.get("stop_reason"),
         "role": metadata.get("role"),
         "task_type": metadata.get("task_type"),
         "profile": metadata.get("profile"),
+        "route": metadata.get("route"),
+        "route_drift": route_drift,
+        "actual_route": actual_route,
+        "actual_model": actual_route.get("actual_model"),
+        "actual_model_usage": actual_route.get("actual_model_usage"),
+        "route_mismatch": actual_route.get("route_mismatch"),
         "latest_phase": event_summary.get("latest_phase"),
         "tool_calls": event_summary.get("tool_calls", []),
-        "stdout_bytes": stdout_path.stat().st_size if stdout_path.exists() else 0,
-        "stderr_bytes": stderr_path.stat().st_size if stderr_path.exists() else 0,
-        "events_bytes": events_path.stat().st_size if events_path.exists() else 0,
+        "stdout_bytes": stdout_bytes,
+        "stderr_bytes": stderr_bytes,
+        "events_bytes": events_bytes,
+        "input_tokens_est": input_tokens_est,
+        "output_tokens_est": output_tokens_est,
+        "total_tokens_est": input_tokens_est + output_tokens_est,
+        "output_budget": output_budget,
         "last_stdout_line": last_nonempty_line(stdout_tail),
         "last_stderr_line": last_nonempty_line(stderr_tail),
         "paths": {
@@ -2795,7 +3351,7 @@ def stop_run(run_id: str, force: bool = False, timeout_seconds: int = 5) -> dict
         }
     requested_at = utc_now_iso()
     (run_dir / "stop-requested.json").write_text(json.dumps({"requested_at": requested_at, "force": force}, ensure_ascii=False), encoding="utf-8")
-    update_metadata(run_dir, status="stop_requested", stop_requested_at=requested_at)
+    update_metadata(run_dir, status="stop_requested", stop_requested_at=requested_at, stop_reason="user_requested")
     append_event(run_dir, {"type": "stop_requested", "force": force})
     results: list[dict[str, Any]] = []
     child_pid = status.get("child_pid")
@@ -2809,7 +3365,7 @@ def stop_run(run_id: str, force: bool = False, timeout_seconds: int = 5) -> dict
     stopped = not final.get("active")
     stopped_at = utc_now_iso()
     if stopped:
-        update_metadata(run_dir, status="stopped", stopped_at=stopped_at, finished_at=stopped_at, exit_code=final.get("exit_code") if final.get("exit_code") is not None else -15)
+        update_metadata(run_dir, status="stopped", stopped_at=stopped_at, finished_at=stopped_at, exit_code=final.get("exit_code") if final.get("exit_code") is not None else -15, stop_reason="user_requested")
         append_event(run_dir, {"type": "stopped", "status": "stopped"})
         final = single_run_status(run_id, include_output_tail=False)
     return {
@@ -2836,8 +3392,7 @@ def read_team_manifest(team_id: str) -> dict[str, Any]:
 def write_team_manifest(team_id: str, data: dict[str, Any]) -> Path:
     TEAMS_DIR.mkdir(parents=True, exist_ok=True)
     path = TEAMS_DIR / f"{team_id}.json"
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    return path
+    return write_json_file(path, data)
 
 
 def send_instruction(
@@ -2847,6 +3402,10 @@ def send_instruction(
     role: str | None = None,
     task_type: str | None = None,
     timeout_seconds: int | None = None,
+    preserve_route: bool = True,
+    reroute: bool = False,
+    route_profile: str | None = None,
+    route_model: str | None = None,
 ) -> dict[str, Any]:
     """Append instruction by stopping the run and restarting with recovered context."""
     if not instruction.strip():
@@ -2893,17 +3452,41 @@ def send_instruction(
         ]
     )
     task = "Continue the previous Claude Code worker run using the new instruction. Preserve useful context, avoid repeating completed work, and report what changed."
+    previous_profile = (metadata.get("profile") or {}).get("name")
+    previous_model = (metadata.get("profile") or {}).get("model")
+    selected_profile = route_profile or (previous_profile if preserve_route and not reroute else None)
+    selected_model = route_model or (previous_model if preserve_route and not reroute else None)
     new_run = run_streaming_agent(
         task=task,
         role=role or str(metadata.get("role") or "implementation"),
         task_type=task_type or metadata.get("task_type"),
-        profile=(metadata.get("profile") or {}).get("name"),
+        profile=selected_profile,
+        model_override=selected_model,
         allow_write=bool(metadata.get("allow_write", False)),
         timeout_seconds=timeout_seconds or metadata.get("timeout_seconds"),
         cwd=Path(str(metadata.get("cwd") or Path.cwd())),
         context=context,
+        max_output_bytes=(metadata.get("output_budget") or {}).get("max_output_bytes"),
+        max_events_bytes=(metadata.get("output_budget") or {}).get("max_events_bytes"),
+        soft_output_bytes=(metadata.get("output_budget") or {}).get("soft_output_bytes"),
+        output_budget_policy=(metadata.get("output_budget") or {}).get("policy"),
+        final_only=bool((metadata.get("output_budget") or {}).get("final_only", False)),
+        final_max_chars=(metadata.get("output_budget") or {}).get("final_max_chars"),
     )
-    return {"ok": True, "old_run_id": run_id, "stop": stop, "new_run": new_run}
+    new_profile = (new_run.get("profile") or {}).get("name")
+    new_model = (new_run.get("profile") or {}).get("model")
+    route_drift = {
+        "previous_profile": previous_profile,
+        "previous_model": previous_model,
+        "current_profile": new_profile,
+        "current_model": new_model,
+        "route_changed": previous_profile != new_profile or previous_model != new_model,
+        "route_change_reason": "explicit_reroute" if reroute or route_profile or route_model else "preserve_route",
+        "preserve_route": preserve_route,
+    }
+    update_metadata(safe_run_dir(str(new_run["run_id"])), parent_run_id=run_id, route_drift=route_drift)
+    new_run["route_drift"] = route_drift
+    return {"ok": True, "old_run_id": run_id, "stop": stop, "new_run": new_run, "route_drift": route_drift}
 
 
 def spawn_role_team(
@@ -2920,25 +3503,123 @@ def spawn_role_team(
         raise OrchestratorError("At least one role is required.")
     team_id = "team-" + new_run_id()
     runs: list[dict[str, Any]] = []
-    for role in selected_roles:
-        run = run_streaming_agent(
-            task=task,
-            role=role,
-            cwd=cwd,
-            context="\n".join(part for part in [f"Team id: {team_id}", context or ""] if part),
-            timeout_seconds=timeout_seconds,
-        )
-        runs.append({"role": role, "run_id": run["run_id"], "status": run["status"], "profile": run.get("profile")})
+    rollback: dict[str, Any] | None = None
+    active_before = 0
+    max_concurrent = max_concurrent_limit()
+    with launch_lock():
+        active_before = int(run_status(include_finished=False).get("active_count") or 0)
+        requested_count = len(selected_roles)
+        if active_before + requested_count > max_concurrent:
+            manifest = {
+                "team_id": team_id,
+                "created_at": utc_now_iso(),
+                "status": "blocked_by_cost_guard",
+                "task": task,
+                "cwd": str(cwd or Path.cwd()),
+                "roles": selected_roles,
+                "runs": [],
+                "active_before": active_before,
+                "max_concurrent": max_concurrent,
+                "requested_count": requested_count,
+                "rollback": {"attempted": False, "stops": []},
+            }
+            path = write_team_manifest(team_id, manifest)
+            return {
+                "ok": False,
+                "status": "blocked_by_cost_guard",
+                "error": f"Cost guard blocked team: active workers {active_before} + requested {requested_count} > max_concurrent {max_concurrent}.",
+                "team_id": team_id,
+                "manifest_path": str(path),
+                "active_before": active_before,
+                "max_concurrent": max_concurrent,
+                "requested_count": requested_count,
+                "launched_count": 0,
+                "runs": [],
+                "rollback": manifest["rollback"],
+            }
+        try:
+            for role in selected_roles:
+                run = run_streaming_agent(
+                    task=task,
+                    role=role,
+                    cwd=cwd,
+                    context="\n".join(part for part in [f"Team id: {team_id}", context or ""] if part),
+                    timeout_seconds=timeout_seconds,
+                    skip_cost_guard=True,
+                )
+                update_metadata(safe_run_dir(str(run["run_id"])), team_id=team_id)
+                runs.append({"role": role, "run_id": run["run_id"], "status": run["status"], "profile": run.get("profile")})
+        except Exception as exc:
+            stops = []
+            for item in runs:
+                try:
+                    stop = stop_run(str(item["run_id"]), force=True, timeout_seconds=5)
+                except Exception as stop_exc:
+                    stop = {"ok": False, "error": str(stop_exc), "run_id": item.get("run_id")}
+                stops.append(stop)
+            failed_stop_count = sum(1 for item in stops if bool(item.get("active")) or not item.get("stopped", True) or not item.get("ok", True))
+            rollback = {
+                "attempted": True,
+                "force": True,
+                "stopped_count": len(stops) - failed_stop_count,
+                "failed_stop_count": failed_stop_count,
+                "stops": stops,
+            }
+            status_name = "rollback_incomplete" if failed_stop_count else "rolled_back_partial_launch"
+            manifest = {
+                "team_id": team_id,
+                "created_at": utc_now_iso(),
+                "status": status_name,
+                "error": str(exc),
+                "task": task,
+                "cwd": str(cwd or Path.cwd()),
+                "roles": selected_roles,
+                "runs": runs,
+                "active_before": active_before,
+                "max_concurrent": max_concurrent,
+                "requested_count": len(selected_roles),
+                "rollback": rollback,
+            }
+            path = write_team_manifest(team_id, manifest)
+            return {
+                "ok": False,
+                "status": status_name,
+                "team_id": team_id,
+                "manifest_path": str(path),
+                "error": str(exc),
+                "active_before": active_before,
+                "max_concurrent": max_concurrent,
+                "requested_count": len(selected_roles),
+                "launched_count": len(runs),
+                "runs": runs,
+                "rollback": rollback,
+            }
     manifest = {
         "team_id": team_id,
         "created_at": utc_now_iso(),
+        "status": "launched",
         "task": task,
         "cwd": str(cwd or Path.cwd()),
         "roles": selected_roles,
         "runs": runs,
+        "active_before": active_before,
+        "max_concurrent": max_concurrent,
+        "requested_count": len(selected_roles),
+        "rollback": rollback,
     }
     path = write_team_manifest(team_id, manifest)
-    return {"ok": True, "team_id": team_id, "manifest_path": str(path), "runs": runs}
+    return {
+        "ok": True,
+        "status": "launched",
+        "team_id": team_id,
+        "manifest_path": str(path),
+        "active_before": active_before,
+        "max_concurrent": max_concurrent,
+        "requested_count": len(selected_roles),
+        "launched_count": len(runs),
+        "runs": runs,
+        "rollback": rollback,
+    }
 
 
 def resolve_team_run_ids(team_id: str | None = None, run_ids: list[str] | None = None) -> list[str]:
@@ -3206,6 +3887,8 @@ def diff_summary(cwd: Path | None = None, limit_chars: int = 200000) -> dict[str
     total_added = sum(item["added"] for item in files.values())
     total_deleted = sum(item["deleted"] for item in files.values())
     needs_tests = bool(files) and (total_added + total_deleted > 20 or any(item["risk"] for item in files.values()))
+    cwd_path = Path(str(diff.get("cwd") or cwd or Path.cwd()))
+    change_split = classify_change_paths(cwd_path, list(files.keys()))
     return {
         "ok": diff.get("ok", False),
         "cwd": diff.get("cwd"),
@@ -3213,17 +3896,55 @@ def diff_summary(cwd: Path | None = None, limit_chars: int = 200000) -> dict[str
         "total_added": total_added,
         "total_deleted": total_deleted,
         "files": files,
+        **change_split,
         "risks": [f"{file}: {', '.join(info['risk'])}" for file, info in files.items() if info["risk"]],
         "needs_tests": needs_tests,
         "truncated": diff.get("truncated", False),
     }
 
 
+def classify_secret_line(line: str, source: str, lineno: int) -> dict[str, Any] | None:
+    has_secret_value = bool(SECRET_VALUE_RE.search(line) or SECRET_ASSIGN_RE.search(line))
+    has_secret_name = bool(SECRET_NAME_RE.search(line))
+    lower_source = source.lower()
+    placeholder = bool(PLACEHOLDER_SECRET_RE.search(line) or any(token in lower_source for token in (".env.example", "example", "fixture", "mock")))
+    if has_secret_value:
+        classification = "placeholder_or_example" if placeholder else "real_secret_candidate"
+        severity = "low" if placeholder else "critical"
+        confidence = "high"
+    elif has_secret_name:
+        stripped = line.strip()
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\s*[:=]\s*)?", stripped):
+            classification = "config_key_name"
+            severity = "low"
+            confidence = "high"
+        elif "process.env" in line or "os.environ" in line or "getenv" in line or re.search(r"(?i)\b(env|config|setting)s?\b", line):
+            classification = "identifier_only"
+            severity = "low"
+            confidence = "medium"
+        else:
+            classification = "unknown_needs_review"
+            severity = "medium"
+            confidence = "medium"
+    else:
+        return None
+    return {
+        "source": source,
+        "line": lineno,
+        "classification": classification,
+        "severity": severity,
+        "confidence": confidence,
+        "blocking": classification in {"real_secret_candidate", "unknown_needs_review"} and severity in BLOCKING_SEVERITIES,
+        "snippet_redacted": str(redact(line))[:500],
+    }
+
+
 def secret_scan_text(text: str, source: str) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     for lineno, line in enumerate(text.splitlines(), 1):
-        if SECRET_VALUE_RE.search(line) or SECRET_ASSIGN_RE.search(line):
-            findings.append({"source": source, "line": lineno, "snippet": str(redact(line))[:500]})
+        finding = classify_secret_line(line, source, lineno)
+        if finding:
+            findings.append(finding)
     return findings
 
 
@@ -3240,7 +3961,26 @@ def secret_scan_run(run_id: str, include_diff: bool = True) -> dict[str, Any]:
         if (cwd / ".git").exists():
             diff = git_diff(cwd=cwd, limit_chars=300000)
             findings.extend(secret_scan_text(str(diff.get("diff", "")), f"git-diff:{cwd}"))
-    return {"ok": len(findings) == 0, "run_id": run_id, "finding_count": len(findings), "findings": findings[:100]}
+    classification_counts: dict[str, int] = {}
+    max_severity = "none"
+    blocking_count = 0
+    for item in findings:
+        classification = str(item.get("classification") or "unknown_needs_review")
+        classification_counts[classification] = classification_counts.get(classification, 0) + 1
+        severity = str(item.get("severity") or "low")
+        if SEVERITY_ORDER.get(severity, 0) > SEVERITY_ORDER.get(max_severity, 0):
+            max_severity = severity
+        if item.get("blocking"):
+            blocking_count += 1
+    return {
+        "ok": blocking_count == 0,
+        "run_id": run_id,
+        "finding_count": len(findings),
+        "blocking_count": blocking_count,
+        "max_severity": max_severity,
+        "classification_counts": classification_counts,
+        "findings": findings[:100],
+    }
 
 
 def rollback_run(run_id: str, confirm: bool = False) -> dict[str, Any]:
@@ -3288,31 +4028,82 @@ def rollback_run(run_id: str, confirm: bool = False) -> dict[str, Any]:
 def load_cost_guard() -> dict[str, Any]:
     if COST_GUARD_PATH.exists():
         return json.loads(COST_GUARD_PATH.read_text(encoding="utf-8"))
-    return {"max_concurrent": 4, "max_timeout_seconds": 1800, "per_model": {}, "updated_at": None}
+    return {"max_concurrent": 4, "max_timeout_seconds": 1800, "per_model": {}, "output_budget": OUTPUT_BUDGET_DEFAULTS, "updated_at": None}
 
 
 def cost_guard(config: dict[str, Any] | None = None, apply: bool = False) -> dict[str, Any]:
     current = load_cost_guard()
     if config:
         current.update(config)
+        if int(current.get("max_concurrent", 1)) < 1:
+            raise OrchestratorError("cost guard max_concurrent must be >= 1.")
+        if int(current.get("max_timeout_seconds", 10)) < 10:
+            raise OrchestratorError("cost guard max_timeout_seconds must be >= 10.")
         current["updated_at"] = utc_now_iso()
         if apply:
-            COST_GUARD_PATH.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
+            write_json_file(COST_GUARD_PATH, current)
     return {"ok": True, "path": str(COST_GUARD_PATH), "applied": apply, "guard": current}
 
 
-def enforce_cost_guard(model: str | None, timeout_seconds: int) -> int:
+def max_concurrent_limit() -> int:
     guard = load_cost_guard()
-    active = run_status(include_finished=False).get("active_count", 0)
-    max_concurrent = int(guard.get("max_concurrent", 4))
-    if active >= max_concurrent:
-        raise OrchestratorError(f"Cost guard blocked run: active workers {active} >= max_concurrent {max_concurrent}.")
+    return max(1, int(guard.get("max_concurrent", 4)))
+
+
+def clamp_timeout_for_model(model: str | None, timeout_seconds: int) -> int:
+    guard = load_cost_guard()
     timeout = min(timeout_seconds, int(guard.get("max_timeout_seconds", timeout_seconds)))
     if model:
         per_model = guard.get("per_model", {}).get(model, {})
         if per_model.get("max_timeout_seconds"):
             timeout = min(timeout, int(per_model["max_timeout_seconds"]))
     return timeout
+
+
+def enforce_cost_guard(model: str | None, timeout_seconds: int) -> int:
+    active = run_status(include_finished=False).get("active_count", 0)
+    max_concurrent = max_concurrent_limit()
+    if active >= max_concurrent:
+        raise OrchestratorError(f"Cost guard blocked run: active workers {active} >= max_concurrent {max_concurrent}.")
+    return clamp_timeout_for_model(model, timeout_seconds)
+
+
+def resolve_output_budget(
+    max_output_bytes: int | None = None,
+    max_events_bytes: int | None = None,
+    soft_output_bytes: int | None = None,
+    output_budget_policy: str | None = None,
+    kill_on_excessive_output: bool = False,
+    final_only: bool = False,
+    final_max_chars: int | None = None,
+) -> dict[str, Any]:
+    guard_budget = dict((load_cost_guard().get("output_budget") or {}))
+    budget = dict(OUTPUT_BUDGET_DEFAULTS)
+    budget.update({k: v for k, v in guard_budget.items() if v is not None})
+    if max_output_bytes is not None:
+        budget["max_output_bytes"] = max_output_bytes if max_output_bytes > 0 else None
+    if max_events_bytes is not None:
+        budget["max_events_bytes"] = max_events_bytes if max_events_bytes > 0 else None
+    if soft_output_bytes is not None:
+        budget["soft_output_bytes"] = soft_output_bytes if soft_output_bytes > 0 else None
+    if output_budget_policy:
+        if output_budget_policy not in {"stop", "truncate"}:
+            raise OrchestratorError("output_budget_policy must be stop or truncate.")
+        budget["policy"] = output_budget_policy
+    if kill_on_excessive_output:
+        budget["policy"] = "stop"
+    if final_only:
+        budget["final_only"] = True
+    if final_max_chars is not None:
+        budget["final_max_chars"] = max(1000, int(final_max_chars))
+    budget.setdefault("state", "within_budget")
+    budget.setdefault("stop_reason", None)
+    budget.setdefault("observed_output_bytes", 0)
+    budget.setdefault("written_output_bytes", 0)
+    budget.setdefault("events_bytes", 0)
+    budget.setdefault("dropped_output_bytes", 0)
+    budget.setdefault("dropped_event_count", 0)
+    return budget
 
 
 def benchmark_model(
@@ -3361,7 +4152,7 @@ def calibrate_policy(preferences: dict[str, Any], apply: bool = True) -> dict[st
     return {"ok": True, "applied": apply, "path": str(CALIBRATION_PATH), "calibration": data}
 
 
-def dashboard(include_finished: bool = True, limit: int = 12, open_browser: bool = False) -> dict[str, Any]:
+def _legacy_dashboard(include_finished: bool = True, limit: int = 12, open_browser: bool = False) -> dict[str, Any]:
     DASHBOARD_DIR.mkdir(parents=True, exist_ok=True)
     data = run_status(include_finished=include_finished, include_output_tail=True, tail_chars=1000, limit=limit)
     route_cards: list[str] = []
@@ -3443,6 +4234,130 @@ def dashboard(include_finished: bool = True, limit: int = 12, open_browser: bool
     return {"ok": True, "path": str(path), "run_count": data.get("count", 0), "opened": open_browser}
 
 
+def dashboard(include_finished: bool = True, limit: int = 12, open_browser: bool = False) -> dict[str, Any]:
+    DASHBOARD_DIR.mkdir(parents=True, exist_ok=True)
+    data = run_status(include_finished=include_finished, include_output_tail=True, tail_chars=1000, limit=limit)
+    route_cards: list[str] = []
+    for role in ("development", "review", "security", "supervisor", "multimodal"):
+        try:
+            route = select_model_for_role(role=role, task_type="multimodal" if role == "multimodal" else None)
+            route_cards.append(
+                f"<div class='route'><b>{html_lib.escape(role)}</b><span>{html_lib.escape(str(route.get('model') or 'unknown'))}</span><small>{html_lib.escape(str(route.get('reason') or ''))}</small></div>"
+            )
+        except Exception as exc:
+            route_cards.append(f"<div class='route'><b>{html_lib.escape(role)}</b><span>unavailable</span><small>{html_lib.escape(str(exc))}</small></div>")
+    workers: list[str] = []
+    timelines: list[str] = []
+    risks: list[str] = []
+    for item in data.get("runs", []):
+        run_id = str(item.get("run_id"))
+        try:
+            summary = summarize_run(run_id, max_events=12, write_artifacts=True)
+            progress = summary.get("progress_summary") or {}
+            risk = summary.get("risk_flags") or {}
+            changed = summary.get("changed_files") or {}
+            timeline_text = str(summary.get("tool_timeline") or "")
+        except Exception as exc:
+            progress = {"recommended_action": "inspect", "phase": item.get("latest_phase"), "last_event": {"text": str(exc)}}
+            risk = risk_summary([{"severity": "low", "code": "dashboard_summary_failed", "message": str(exc), "blocking": False}])
+            changed = {"files": [], "project_source_changes": {"paths": [], "changed_count": 0}, "agent_artifact_changes": {"paths": [], "changed_count": 0}}
+            timeline_text = ""
+        output_budget = item.get("output_budget") or {}
+        route_drift = item.get("route_drift") or {}
+        actual_route = item.get("actual_route") or {}
+        source_changes = changed.get("project_source_changes") or {}
+        artifact_changes = changed.get("agent_artifact_changes") or {}
+        max_severity = str(risk.get("max_severity") or "none")
+        blocking_count = int(risk.get("blocking_count") or 0)
+        warning_count = int(risk.get("warning_count") or 0)
+        budget_state = str(output_budget.get("state") or "unknown")
+        stop_reason = str(item.get("stop_reason") or output_budget.get("stop_reason") or "none")
+        active_text = "active" if item.get("active") else "inactive"
+        role = str(item.get("role") or "worker")
+        status_text = str(item.get("status") or "unknown")
+        declared_model = str((item.get("profile") or {}).get("model") or "unknown")
+        actual_model = str(actual_route.get("actual_model") or item.get("actual_model") or "")
+        model = actual_model or declared_model
+        route_changed = "yes" if route_drift.get("route_changed") else "no"
+        route_mismatch = "yes" if actual_route.get("route_mismatch") or item.get("route_mismatch") else "no"
+        workers.append(
+            f"<button class='worker' data-role='{html_lib.escape(role)}' data-status='{html_lib.escape(status_text)}' data-risk='{html_lib.escape(max_severity)}' data-active='{html_lib.escape(active_text)}' data-model='{html_lib.escape(model)}'>"
+            f"<span><b>{html_lib.escape(role)}</b><code>{run_id}</code></span>"
+            f"<small>{html_lib.escape(status_text)} / {active_text} / actual {html_lib.escape(model)}</small>"
+            f"<small>declared {html_lib.escape(declared_model)} / mismatch {route_mismatch}</small>"
+            f"<small>risk {html_lib.escape(max_severity)} / budget {html_lib.escape(budget_state)} / route drift {route_changed}</small></button>"
+        )
+        timeline_lines = "".join(f"<li>{html_lib.escape(line[2:] if line.startswith('- ') else line)}</li>" for line in timeline_text.splitlines() if line.startswith("- "))
+        timelines.append(
+            f"<section class='panel'><h2>Timeline / Logs <code>{run_id}</code></h2>"
+            f"<p><b>{html_lib.escape(str(progress.get('recommended_action')))}</b> / phase {html_lib.escape(str(progress.get('phase') or 'unknown'))} / heartbeat {html_lib.escape(str((progress.get('last_event') or {}).get('ts') or 'unknown'))}</p>"
+            f"<p>source changes {source_changes.get('changed_count', 0)} / artifacts {artifact_changes.get('changed_count', 0)} / stop {html_lib.escape(stop_reason)}</p>"
+            f"<ol>{timeline_lines or '<li>No timeline events yet.</li>'}</ol></section>"
+        )
+        risk_items = "".join(f"<li><b>{html_lib.escape(str(flag.get('severity')))}</b> {html_lib.escape(str(flag.get('code')))}: {html_lib.escape(str(flag.get('message')))}</li>" for flag in risk.get("flags", []))
+        control_lines = [
+            f"poll-run --run-id {run_id}",
+            f"summarize-run --run-id {run_id}",
+            f"verify-run --run-id {run_id}",
+            f"secret-scan-run --run-id {run_id}",
+            f"stop-run --run-id {run_id} --force",
+            f"open-run-folder --run-id {run_id}",
+            f"controller-report --run-id {run_id}",
+        ]
+        controls = "".join(f"<li><code>{html_lib.escape(command)}</code></li>" for command in control_lines)
+        token_est = item.get("total_tokens_est")
+        budget_lines = [
+            f"state `{budget_state}`",
+            f"tokens est `{token_est if token_est is not None else 'unknown'}`",
+            f"actual cost usd `{actual_route.get('actual_cost_usd') if actual_route.get('actual_cost_usd') is not None else 'unknown'}`",
+            f"stdout `{item.get('stdout_bytes', 0)}` bytes",
+            f"stderr `{item.get('stderr_bytes', 0)}` bytes",
+            f"events `{item.get('events_bytes', 0)}` bytes",
+            f"stop reason `{stop_reason}`",
+        ]
+        budget_html = "".join(f"<li>{html_lib.escape(line)}</li>" for line in budget_lines)
+        route_html = (
+            f"<p>Route: declared {html_lib.escape(declared_model)} / actual {html_lib.escape(actual_model or 'unknown')} / mismatch {route_mismatch}; "
+            f"follow-up drift {route_changed}</p>"
+        )
+        risks.append(
+            f"<section class='panel'><h2>Diff / Risk / Controls <code>{run_id}</code></h2>"
+            f"<p>Risk: max {html_lib.escape(max_severity)}, blocking {blocking_count}, warnings {warning_count}</p>"
+            f"<ul>{risk_items or '<li>No risk flags detected.</li>'}</ul>"
+            f"<p>Source: {html_lib.escape(', '.join(source_changes.get('paths', [])[:8]) or 'none')}</p>"
+            f"<p>Artifacts: {html_lib.escape(', '.join(artifact_changes.get('paths', [])[:8]) or 'none')}</p>"
+            f"{route_html}<h3>Output Budget</h3><ul>{budget_html}</ul>"
+            f"<h3>Controls</h3><ul>{controls}</ul></section>"
+        )
+    html = "\n".join(
+        [
+            "<!doctype html><html><head><meta charset='utf-8'><title>Claude Code Workers</title>",
+            "<style>body{font-family:system-ui;background:#0d1117;color:#e6edf3;margin:0}header{padding:16px 20px;border-bottom:1px solid #30363d;background:#161b22}.routes,.filters{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-top:12px}.route,.filter{border:1px solid #30363d;border-radius:8px;padding:10px;background:#0d1117}.route b,.route span,.route small{display:block}.route span{color:#7ee787}.route small,.filter label{color:#8b949e;margin-top:4px}.filter select,.filter input{width:100%;box-sizing:border-box;background:#010409;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:8px;margin-top:6px}.grid{display:grid;grid-template-columns:300px minmax(360px,1fr) 420px;gap:16px;padding:16px}.panel,.worker{border:1px solid #30363d;border-radius:8px;background:#161b22}.panel{padding:14px;margin-bottom:12px}.worker{width:100%;text-align:left;color:#e6edf3;padding:12px;margin-bottom:10px;display:block}.worker[hidden]{display:none}.worker span{display:flex;justify-content:space-between;gap:8px}.worker small{display:block;color:#8b949e;margin-top:6px}code{color:#7ee787;overflow-wrap:anywhere}ol,ul{padding-left:22px}li{margin:8px 0;line-height:1.35}p{color:#c9d1d9}h3{margin-bottom:4px}@media(max-width:980px){.grid{grid-template-columns:1fr}}</style>",
+            "</head><body><header><h1>Claude Code Worker Dashboard</h1>",
+            f"<p>Generated at {utc_now_iso()} / Runs {data.get('count', 0)} / Active {data.get('active_count', 0)}</p>",
+            "<h2>Model Routing</h2><div class='routes'>",
+            "".join(route_cards),
+            "</div><h2>Filters</h2><div class='filters'><div class='filter'><label>Role<input id='roleFilter' placeholder='security'></label></div><div class='filter'><label>Status<input id='statusFilter' placeholder='running'></label></div><div class='filter'><label>Risk<select id='riskFilter'><option value=''>all</option><option>critical</option><option>high</option><option>medium</option><option>low</option><option>none</option></select></label></div><div class='filter'><label>Active<select id='activeFilter'><option value=''>all</option><option>active</option><option>inactive</option></select></label></div></div></header>",
+            "<main class='grid'><aside>",
+            "".join(workers) if workers else "<p>No runs found.</p>",
+            "</aside><section>",
+            "".join(timelines),
+            "</section><aside>",
+            "".join(risks),
+            "</aside></main><script>const roleFilter=document.getElementById('roleFilter'),statusFilter=document.getElementById('statusFilter'),riskFilter=document.getElementById('riskFilter'),activeFilter=document.getElementById('activeFilter');function applyFilters(){const role=roleFilter.value.toLowerCase(),status=statusFilter.value.toLowerCase(),risk=riskFilter.value.toLowerCase(),active=activeFilter.value.toLowerCase();document.querySelectorAll('.worker').forEach(el=>{const ok=(!role||el.dataset.role.toLowerCase().includes(role))&&(!status||el.dataset.status.toLowerCase().includes(status))&&(!risk||el.dataset.risk.toLowerCase()===risk)&&(!active||el.dataset.active.toLowerCase()===active);el.hidden=!ok;});}[roleFilter,statusFilter,riskFilter,activeFilter].forEach(el=>el.addEventListener('input',applyFilters));</script>",
+            "</body></html>",
+        ]
+    )
+    path = DASHBOARD_DIR / "index.html"
+    path.write_text(html, encoding="utf-8")
+    if open_browser:
+        if os.name == "nt":
+            subprocess.Popen(["cmd", "/c", "start", "", str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            subprocess.Popen(["xdg-open", str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return {"ok": True, "path": str(path), "run_count": data.get("count", 0), "opened": open_browser}
+
+
 def open_run_folder(run_id: str, open_folder: bool = True) -> dict[str, Any]:
     run_dir = safe_run_dir(run_id)
     if not run_dir.exists():
@@ -3493,6 +4408,269 @@ def export_report(run_id: str | None = None, team_id: str | None = None, output_
     path = report_dir / name
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
     return {"ok": True, "path": str(path), "run_id": run_id, "team_id": team_id}
+
+
+def controller_report(
+    run_id: str | None = None,
+    team_id: str | None = None,
+    date: str | None = None,
+    include_finished: bool = True,
+    limit: int = 50,
+    output_dir: Path | None = None,
+) -> dict[str, Any]:
+    report_dir = output_dir or REPORTS_DIR
+    report_dir.mkdir(parents=True, exist_ok=True)
+    dashboard_path = DASHBOARD_DIR / "index.html"
+    if dashboard_path.exists():
+        dashboard_result = {"ok": True, "path": str(dashboard_path), "run_count": None, "opened": False}
+    else:
+        dashboard_result = dashboard(include_finished=include_finished, limit=min(limit, 8), open_browser=False)
+    usage_summary = daily_usage_summary(date=date, write_report=True)
+    if run_id:
+        run_ids = [run_id]
+    elif team_id:
+        run_ids = resolve_team_run_ids(team_id=team_id)
+    else:
+        run_ids = [str(item.get("run_id")) for item in run_status(include_finished=include_finished, limit=limit).get("runs", [])]
+    run_rows: list[dict[str, Any]] = []
+    source_paths: list[str] = []
+    artifact_paths: list[str] = []
+    max_severity = "none"
+    blocking_runs = 0
+    secret_summary: dict[str, int] = {}
+    for rid in run_ids:
+        try:
+            status = single_run_status(rid, include_output_tail=False)
+            usage = estimate_run_usage(rid)
+            changed = changed_files_for_run(rid)
+            risks = detect_failure_modes(rid, status=status, changed_files=changed)
+            scan = secret_scan_run(rid, include_diff=False)
+        except Exception as exc:
+            run_rows.append({"run_id": rid, "status": "unreadable", "error": str(exc)})
+            continue
+        source = changed.get("project_source_changes") or {}
+        artifacts = changed.get("agent_artifact_changes") or {}
+        source_paths.extend(source.get("paths") or [])
+        artifact_paths.extend(artifacts.get("paths") or [])
+        severity = str(risks.get("max_severity") or "none")
+        if SEVERITY_ORDER.get(severity, 0) > SEVERITY_ORDER.get(max_severity, 0):
+            max_severity = severity
+        if not risks.get("blocking_ok", risks.get("ok", True)):
+            blocking_runs += 1
+        for key, count in (scan.get("classification_counts") or {}).items():
+            secret_summary[str(key)] = secret_summary.get(str(key), 0) + int(count)
+        budget = status.get("output_budget") or {}
+        actual_route = status.get("actual_route") or {}
+        run_rows.append(
+            {
+                "run_id": rid,
+                "status": status.get("status"),
+                "active": status.get("active"),
+                "role": status.get("role"),
+                "model": usage.get("model"),
+                "declared_model": usage.get("declared_model") or (status.get("profile") or {}).get("model"),
+                "actual_model": usage.get("actual_model") or actual_route.get("actual_model"),
+                "route_mismatch": usage.get("route_mismatch") or actual_route.get("route_mismatch"),
+                "duration_ms": usage.get("duration_ms") if usage.get("duration_ms") is not None else status.get("elapsed_ms"),
+                "tokens_est": usage.get("total_tokens_est") if usage.get("total_tokens_est") is not None else status.get("total_tokens_est"),
+                "actual_cost_usd": usage.get("actual_cost_usd") if usage.get("actual_cost_usd") is not None else actual_route.get("actual_cost_usd"),
+                "stdout_bytes": status.get("stdout_bytes"),
+                "stderr_bytes": status.get("stderr_bytes"),
+                "events_bytes": status.get("events_bytes"),
+                "budget_state": budget.get("state"),
+                "stop_reason": status.get("stop_reason") or budget.get("stop_reason"),
+                "risk_max_severity": risks.get("max_severity"),
+                "risk_warning_count": risks.get("warning_count"),
+                "risk_blocking_count": risks.get("blocking_count"),
+                "source_change_count": source.get("changed_count", 0),
+                "artifact_change_count": artifacts.get("changed_count", 0),
+                "route_drift": status.get("route_drift"),
+                "secret_scan": {
+                    "finding_count": scan.get("finding_count"),
+                    "blocking_count": scan.get("blocking_count"),
+                    "classification_counts": scan.get("classification_counts"),
+                },
+            }
+        )
+    recommendations: list[str] = []
+    if blocking_runs:
+        recommendations.append("Review blocking risk runs before accepting worker output.")
+    if usage_summary.get("budget_stop_count"):
+        recommendations.append("Tune output budgets or switch noisy tasks to final-only mode.")
+    if secret_summary.get("real_secret_candidate"):
+        recommendations.append("Inspect redacted secret findings and rotate any exposed credentials.")
+    if source_paths:
+        recommendations.append("Review project source changes separately from agent artifacts.")
+    if not recommendations:
+        recommendations.append("No blocking controller issue detected in the selected run set.")
+    lines = [
+        "# Controller Pressure Report",
+        "",
+        f"Generated: {utc_now_iso()}",
+        f"Scope: `{run_id or team_id or date or 'recent-runs'}`",
+        "",
+        "## Summary",
+        f"- Runs: `{len(run_rows)}`",
+        f"- Active now: `{run_status(include_finished=False).get('active_count', 0)}`",
+        f"- Max risk severity: `{max_severity}`",
+        f"- Blocking risk runs: `{blocking_runs}`",
+        f"- Dashboard: `{dashboard_result.get('path')}`",
+        f"- Usage summary: `{usage_summary.get('report_path')}`",
+        f"- Estimated tokens: `{usage_summary.get('total_tokens_est')}`",
+        f"- Total duration: `{usage_summary.get('total_duration_ms')}` ms",
+        f"- Output bytes: `{usage_summary.get('total_output_bytes')}`",
+        f"- Events bytes: `{usage_summary.get('total_events_bytes')}`",
+        f"- Output budget stops: `{usage_summary.get('budget_stop_count')}`",
+        "",
+        "## By Model Usage",
+    ]
+    by_model = usage_summary.get("by_model") or {}
+    if by_model:
+        for model, bucket in sorted(by_model.items()):
+            lines.append(
+                f"- `{model}`: runs `{bucket.get('runs')}`, failures `{bucket.get('failures')}`, duration `{bucket.get('duration_ms')}` ms, "
+                f"tokens `{bucket.get('tokens_est')}`, output `{bucket.get('output_bytes')}` bytes, events `{bucket.get('events_bytes')}` bytes, "
+                f"budget stops `{bucket.get('budget_stops')}`, warnings `{bucket.get('warning_count')}`, blocking `{bucket.get('blocking_count')}`, "
+                f"route mismatches `{bucket.get('route_mismatch_count')}`, max severity `{bucket.get('max_severity')}`"
+            )
+    else:
+        lines.append("- No model usage recorded.")
+    lines.extend(
+        [
+        "",
+        "## Source vs Artifacts",
+        f"- Project source changed paths: `{len(set(source_paths))}`",
+        f"- Agent artifact changed paths: `{len(set(artifact_paths))}`",
+        "",
+        "## Secret Scan",
+        ]
+    )
+    if secret_summary:
+        lines.extend(f"- `{key}`: `{value}`" for key, value in sorted(secret_summary.items()))
+    else:
+        lines.append("- No secret findings in selected run logs.")
+    lines.extend(["", "## Runs"])
+    for row in run_rows:
+        lines.append(
+            f"- `{row.get('run_id')}` role `{row.get('role')}` model `{row.get('model')}` status `{row.get('status')}` "
+            f"declared `{row.get('declared_model')}` actual `{row.get('actual_model') or 'unknown'}` mismatch `{row.get('route_mismatch')}` "
+            f"duration `{row.get('duration_ms')}` ms tokens `{row.get('tokens_est')}` cost `{row.get('actual_cost_usd')}` stdout `{row.get('stdout_bytes')}` events `{row.get('events_bytes')}` "
+            f"risk `{row.get('risk_max_severity')}` warnings `{row.get('risk_warning_count')}` blocking `{row.get('risk_blocking_count')}` "
+            f"budget `{row.get('budget_state')}` source `{row.get('source_change_count')}` artifacts `{row.get('artifact_change_count')}`"
+        )
+    lines.extend(["", "## Recommendations"])
+    lines.extend(f"- {item}" for item in recommendations)
+    name = f"controller-report-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.md"
+    path = report_dir / name
+    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    return {
+        "ok": True,
+        "path": str(path),
+        "dashboard_path": dashboard_result.get("path"),
+        "usage_summary_path": usage_summary.get("report_path"),
+        "run_count": len(run_rows),
+        "active_count": run_status(include_finished=False).get("active_count", 0),
+        "max_severity": max_severity,
+        "blocking_runs": blocking_runs,
+        "by_model_usage": by_model,
+        "secret_classification_counts": secret_summary,
+        "source_change_count": len(set(source_paths)),
+        "artifact_change_count": len(set(artifact_paths)),
+        "recommendations": recommendations,
+        "runs": run_rows,
+    }
+
+
+def decision_review(
+    task: str,
+    proposed_action: str,
+    run_id: str | None = None,
+    team_id: str | None = None,
+    evidence: str | None = None,
+    output_dir: Path | None = None,
+) -> dict[str, Any]:
+    packet: dict[str, Any] = {
+        "task": task,
+        "proposed_action": proposed_action,
+        "run_id": run_id,
+        "team_id": team_id,
+        "evidence": evidence or "",
+        "created_at": utc_now_iso(),
+        "runs": [],
+    }
+    run_ids: list[str] = []
+    if run_id:
+        run_ids.append(run_id)
+    if team_id:
+        run_ids.extend(resolve_team_run_ids(team_id=team_id))
+    objections: list[str] = []
+    missing_evidence: list[str] = []
+    required_changes: list[str] = []
+    max_severity = "none"
+    for rid in dict.fromkeys(run_ids):
+        status = single_run_status(rid, include_output_tail=False)
+        changed = changed_files_for_run(rid)
+        risks = detect_failure_modes(rid, status=status, changed_files=changed)
+        packet["runs"].append({"status": status, "changed_files": changed, "risks": risks})
+        severity = str(risks.get("max_severity") or "none")
+        if SEVERITY_ORDER.get(severity, 0) > SEVERITY_ORDER.get(max_severity, 0):
+            max_severity = severity
+        if status.get("active"):
+            objections.append(f"Run {rid} is still active.")
+        if not risks.get("blocking_ok", True):
+            objections.append(f"Run {rid} has blocking risk flags.")
+        if (changed.get("project_source_changes") or {}).get("changed_count") and "verify" not in proposed_action.lower():
+            required_changes.append("Run verification should be completed before accepting source changes.")
+    if not evidence and not run_ids:
+        missing_evidence.append("No run/team evidence was provided.")
+    if "merge" in proposed_action.lower() and (not evidence and not run_ids):
+        objections.append("Merge-like action lacks evidence.")
+    if objections:
+        verdict = "block"
+        confidence = "high"
+    elif required_changes or missing_evidence or max_severity in {"medium", "low"}:
+        verdict = "revise"
+        confidence = "medium"
+    else:
+        verdict = "approve"
+        confidence = "medium" if not run_ids else "high"
+    report_dir = output_dir or REPORTS_DIR
+    report_dir.mkdir(parents=True, exist_ok=True)
+    path = report_dir / f"decision-review-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.md"
+    lines = [
+        "# Supervisor Decision Review",
+        "",
+        f"Verdict: `{verdict}`",
+        f"Confidence: `{confidence}`",
+        f"Max severity: `{max_severity}`",
+        "",
+        "## Proposed Action",
+        proposed_action,
+        "",
+        "## Objections",
+        *(f"- {item}" for item in objections),
+        *(["- None."] if not objections else []),
+        "",
+        "## Missing Evidence",
+        *(f"- {item}" for item in missing_evidence),
+        *(["- None."] if not missing_evidence else []),
+        "",
+        "## Required Changes",
+        *(f"- {item}" for item in required_changes),
+        *(["- None."] if not required_changes else []),
+    ]
+    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    return {
+        "ok": True,
+        "verdict": verdict,
+        "confidence": confidence,
+        "objections": objections,
+        "missing_evidence": missing_evidence,
+        "required_changes": required_changes,
+        "judgment": "Supervisor allows the action only when blocking risks are cleared and evidence is enough.",
+        "packet": packet,
+        "report_path": str(path),
+    }
 
 
 def run_test_command(command: str, cwd: Path, timeout_seconds: int = 300) -> dict[str, Any]:
@@ -3590,8 +4768,8 @@ def verify_run(
         lines.extend(["", "## Blocking Notes"])
         if not scope.get("ok", True):
             lines.append(f"- Write scope blocked acceptance. {scope.get('rollback_recommendation') or ''}".strip())
-        if scan.get("finding_count"):
-            lines.append("- Secret scan found possible credentials. Review logs before sharing output.")
+        if not scan.get("ok", True):
+            lines.append("- Secret scan found blocking credential-like values. Review redacted findings before sharing output.")
         if not failures.get("ok", True):
             lines.append("- Failure-mode detection found blocking run behavior.")
         if tests and not gates["tests_ok"]:
@@ -3625,11 +4803,22 @@ def estimate_run_usage(run_id: str) -> dict[str, Any]:
     run_dir = safe_run_dir(run_id)
     metadata = read_metadata(run_dir)
     prompt = (run_dir / "prompt.txt").read_text(encoding="utf-8", errors="replace") if (run_dir / "prompt.txt").exists() else ""
-    stdout = (run_dir / "stdout.txt").read_text(encoding="utf-8", errors="replace") if (run_dir / "stdout.txt").exists() else ""
-    stderr = (run_dir / "stderr.txt").read_text(encoding="utf-8", errors="replace") if (run_dir / "stderr.txt").exists() else ""
+    stdout_path = run_dir / "stdout.txt"
+    stderr_path = run_dir / "stderr.txt"
+    events_path = run_dir / "events.ndjson"
+    stdout_bytes = stdout_path.stat().st_size if stdout_path.exists() else 0
+    stderr_bytes = stderr_path.stat().st_size if stderr_path.exists() else 0
+    events_bytes = events_path.stat().st_size if events_path.exists() else 0
     profile = metadata.get("profile") or {}
+    actual_route = actual_route_summary(metadata)
+    declared_model = profile.get("model")
+    actual_model = actual_route.get("actual_model")
     input_tokens = estimate_tokens_from_text(prompt)
-    output_tokens = estimate_tokens_from_text(stdout + "\n" + stderr)
+    output_tokens = max(0, int((stdout_bytes + stderr_bytes) / 4))
+    if actual_route.get("actual_total_tokens") is not None:
+        input_tokens = int(actual_route.get("actual_input_tokens") or 0)
+        output_tokens = int(actual_route.get("actual_output_tokens") or 0)
+    output_budget = output_budget_from_metadata(metadata, run_dir)
     return {
         "run_id": run_id,
         "started_at": metadata.get("started_at"),
@@ -3637,12 +4826,36 @@ def estimate_run_usage(run_id: str) -> dict[str, Any]:
         "status": metadata.get("status") or ("succeeded" if metadata.get("exit_code") == 0 else "failed" if metadata.get("exit_code") is not None else "unknown"),
         "role": metadata.get("role"),
         "profile": profile.get("name"),
-        "model": profile.get("model"),
+        "model": actual_model or declared_model,
+        "model_source": "actual_model_usage" if actual_model else "declared_route",
+        "declared_model": declared_model,
+        "actual_model": actual_model,
+        "actual_model_usage": actual_route.get("actual_model_usage"),
+        "route_mismatch": actual_route.get("route_mismatch"),
         "duration_ms": metadata.get("duration_ms"),
         "input_tokens_est": input_tokens,
         "output_tokens_est": output_tokens,
         "total_tokens_est": input_tokens + output_tokens,
+        "actual_cost_usd": actual_route.get("actual_cost_usd"),
+        "stdout_bytes": stdout_bytes,
+        "stderr_bytes": stderr_bytes,
+        "events_bytes": events_bytes,
+        "output_budget": output_budget,
+        "stop_reason": metadata.get("stop_reason") or output_budget.get("stop_reason"),
     }
+
+
+def risk_snapshot_for_usage(run_id: str) -> dict[str, Any]:
+    run_dir = safe_run_dir(run_id)
+    cached = run_dir / CONTROLLER_ARTIFACTS["risk_flags"]
+    if cached.exists():
+        data = read_json_file(cached, {})
+        if data:
+            return data
+    try:
+        return detect_failure_modes(run_id)
+    except Exception as exc:
+        return risk_summary([{"code": "risk_snapshot_failed", "severity": "low", "blocking": False, "message": str(exc)}])
 
 
 def score_worker(
@@ -3671,7 +4884,7 @@ def score_worker(
         score -= 15
     if not scope.get("ok", True):
         score -= 25
-    if scan.get("finding_count"):
+    if scan.get("blocking_count"):
         score -= 30
     if failures.get("flag_count"):
         score -= min(25, int(failures.get("flag_count") or 0) * 8)
@@ -3694,7 +4907,7 @@ def score_worker(
         "quality_score": score,
         "solved": solved_value,
         "scope_ok": bool(scope.get("ok", True)),
-        "secret_ok": not bool(scan.get("finding_count")),
+        "secret_ok": bool(scan.get("ok", True)),
         "failure_flags": failures.get("flags", []),
         "hallucination": hallucination_value,
         "needs_rework": needs_rework_value,
@@ -3726,21 +4939,55 @@ def daily_usage_summary(date: str | None = None, write_report: bool = False) -> 
             continue
         started = str(usage.get("started_at") or "")
         if started.startswith(target_date):
+            risks = risk_snapshot_for_usage(path.name)
+            usage["risk_max_severity"] = risks.get("max_severity", "none")
+            usage["risk_warning_count"] = int(risks.get("warning_count") or 0)
+            usage["risk_blocking_count"] = int(risks.get("blocking_count") or 0)
+            usage["risk_flag_count"] = int(risks.get("flag_count") or 0)
             runs.append(usage)
     by_model: dict[str, dict[str, Any]] = {}
     for item in runs:
         model = str(item.get("model") or "unknown")
-        bucket = by_model.setdefault(model, {"runs": 0, "failures": 0, "duration_ms": 0, "tokens_est": 0})
+        bucket = by_model.setdefault(
+            model,
+            {
+                "runs": 0,
+                "failures": 0,
+                "duration_ms": 0,
+                "tokens_est": 0,
+                "output_bytes": 0,
+                "events_bytes": 0,
+                "budget_stops": 0,
+                "warning_count": 0,
+                "blocking_count": 0,
+                "route_mismatch_count": 0,
+                "max_severity": "none",
+            },
+        )
         bucket["runs"] += 1
         if item.get("status") not in {"succeeded", "stopped"}:
             bucket["failures"] += 1
         bucket["duration_ms"] += int(item.get("duration_ms") or 0)
         bucket["tokens_est"] += int(item.get("total_tokens_est") or 0)
+        bucket["output_bytes"] += int(item.get("stdout_bytes") or 0) + int(item.get("stderr_bytes") or 0)
+        bucket["events_bytes"] += int(item.get("events_bytes") or 0)
+        bucket["warning_count"] += int(item.get("risk_warning_count") or 0)
+        bucket["blocking_count"] += int(item.get("risk_blocking_count") or 0)
+        if item.get("route_mismatch"):
+            bucket["route_mismatch_count"] += 1
+        severity = str(item.get("risk_max_severity") or "none")
+        if SEVERITY_ORDER.get(severity, 0) > SEVERITY_ORDER.get(str(bucket.get("max_severity") or "none"), 0):
+            bucket["max_severity"] = severity
+        if item.get("stop_reason") in {"output_budget_exceeded", "events_budget_exceeded"}:
+            bucket["budget_stops"] += 1
     result = {
         "ok": True,
         "date": target_date,
         "run_count": len(runs),
         "total_tokens_est": sum(int(item.get("total_tokens_est") or 0) for item in runs),
+        "total_output_bytes": sum(int(item.get("stdout_bytes") or 0) + int(item.get("stderr_bytes") or 0) for item in runs),
+        "total_events_bytes": sum(int(item.get("events_bytes") or 0) for item in runs),
+        "budget_stop_count": sum(1 for item in runs if item.get("stop_reason") in {"output_budget_exceeded", "events_budget_exceeded"}),
         "total_duration_ms": sum(int(item.get("duration_ms") or 0) for item in runs),
         "failure_count": sum(1 for item in runs if item.get("status") not in {"succeeded", "stopped"}),
         "by_model": by_model,
@@ -3750,9 +4997,9 @@ def daily_usage_summary(date: str | None = None, write_report: bool = False) -> 
     if write_report:
         REPORTS_DIR.mkdir(parents=True, exist_ok=True)
         path = REPORTS_DIR / f"usage-{target_date}.md"
-        lines = ["# Daily Usage Summary", "", f"Date: `{target_date}`", "", f"- Runs: `{result['run_count']}`", f"- Estimated tokens: `{result['total_tokens_est']}`", f"- Failures: `{result['failure_count']}`", "", "## By Model"]
+        lines = ["# Daily Usage Summary", "", f"Date: `{target_date}`", "", f"- Runs: `{result['run_count']}`", f"- Estimated tokens: `{result['total_tokens_est']}`", f"- Output bytes: `{result['total_output_bytes']}`", f"- Events bytes: `{result['total_events_bytes']}`", f"- Output budget stops: `{result['budget_stop_count']}`", f"- Failures: `{result['failure_count']}`", "", "## By Model"]
         for model, bucket in by_model.items():
-            lines.append(f"- `{model}`: runs `{bucket['runs']}`, failures `{bucket['failures']}`, estimated tokens `{bucket['tokens_est']}`")
+            lines.append(f"- `{model}`: runs `{bucket['runs']}`, failures `{bucket['failures']}`, duration `{bucket['duration_ms']}` ms, output bytes `{bucket['output_bytes']}`, events bytes `{bucket['events_bytes']}`, budget stops `{bucket['budget_stops']}`, warnings `{bucket['warning_count']}`, blocking `{bucket['blocking_count']}`, route mismatches `{bucket['route_mismatch_count']}`, max severity `{bucket['max_severity']}`, estimated tokens `{bucket['tokens_est']}`")
         path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
         result["report_path"] = str(path)
     return result
@@ -4043,9 +5290,11 @@ def write_fake_claude_launcher(directory: Path) -> Path:
                 "import json, os, sys, time",
                 "steps = int(os.environ.get('CC_ORCHESTRATOR_FAKE_STEPS', '4'))",
                 "delay = float(os.environ.get('CC_ORCHESTRATOR_FAKE_DELAY', '0.05'))",
+                "payload_bytes = int(os.environ.get('CC_ORCHESTRATOR_FAKE_PAYLOAD_BYTES', '0'))",
+                "payload = 'x' * payload_bytes",
                 "print(json.dumps({'type':'system','subtype':'init','cwd':os.getcwd()}), flush=True)",
                 "for i in range(steps):",
-                "    print(json.dumps({'type':'assistant','phase':f'mock-step-{i}','message':{'content':[{'type':'text','text':f'mock step {i}'}]}}), flush=True)",
+                "    print(json.dumps({'type':'assistant','phase':f'mock-step-{i}','message':{'content':[{'type':'text','text':f'mock step {i} {payload}'}]}}), flush=True)",
                 "    time.sleep(delay)",
                 "print(json.dumps({'type':'result','subtype':'success','result':'mock complete'}), flush=True)",
             ]
@@ -4068,6 +5317,7 @@ def mock_stream_test(timeout_seconds: int = 20) -> dict[str, Any]:
     old_bin = os.environ.get("CLAUDE_CODE_BIN")
     old_steps = os.environ.get("CC_ORCHESTRATOR_FAKE_STEPS")
     old_delay = os.environ.get("CC_ORCHESTRATOR_FAKE_DELAY")
+    old_payload = os.environ.get("CC_ORCHESTRATOR_FAKE_PAYLOAD_BYTES")
     mock_parent = Path(os.environ.get("PROGRAMDATA") or "C:/ProgramData") / "cc-orchestrator-mock"
     mock_dir = mock_parent / uuid.uuid4().hex[:12]
     mock_dir.mkdir(parents=True, exist_ok=False)
@@ -4105,6 +5355,29 @@ def mock_stream_test(timeout_seconds: int = 20) -> dict[str, Any]:
             gates["status_saw_active_worker"] = bool(before_stop.get("active"))
             gates["stop_run_stopped_worker"] = bool(stopped.get("stopped")) or not bool(after_stop.get("active"))
             gates["status_after_stop_inactive"] = not bool(after_stop.get("active"))
+
+            os.environ["CC_ORCHESTRATOR_FAKE_STEPS"] = "20"
+            os.environ["CC_ORCHESTRATOR_FAKE_DELAY"] = "0.01"
+            os.environ["CC_ORCHESTRATOR_FAKE_PAYLOAD_BYTES"] = "4096"
+            budget_run = run_streaming_agent(
+                "mock output budget test",
+                role="testing",
+                timeout_seconds=timeout_seconds,
+                max_output_bytes=3000,
+                max_events_bytes=200000,
+                kill_on_excessive_output=True,
+            )
+            deadline = time.time() + timeout_seconds
+            budget_status: dict[str, Any] = {}
+            while time.time() < deadline:
+                budget_status = run_status(run_id=budget_run["run_id"])
+                if not budget_status.get("active"):
+                    break
+                time.sleep(0.1)
+            budget_meta = read_metadata(safe_run_dir(budget_run["run_id"]))
+            budget_state = budget_meta.get("output_budget") or {}
+            gates["output_budget_stopped_worker"] = budget_status.get("status") == "stopped"
+            gates["output_budget_reason_recorded"] = budget_meta.get("stop_reason") == "output_budget_exceeded" or budget_state.get("stop_reason") == "output_budget_exceeded"
             details = {
                 "finish_run_id": finish_run["run_id"],
                 "finish_poll": finish_poll,
@@ -4112,6 +5385,9 @@ def mock_stream_test(timeout_seconds: int = 20) -> dict[str, Any]:
                 "before_stop": before_stop,
                 "stop_result": stopped,
                 "after_stop": after_stop,
+                "budget_run_id": budget_run["run_id"],
+                "budget_status": budget_status,
+                "budget_state": budget_state,
             }
         finally:
             if old_bin is None:
@@ -4126,6 +5402,10 @@ def mock_stream_test(timeout_seconds: int = 20) -> dict[str, Any]:
                 os.environ.pop("CC_ORCHESTRATOR_FAKE_DELAY", None)
             else:
                 os.environ["CC_ORCHESTRATOR_FAKE_DELAY"] = old_delay
+            if old_payload is None:
+                os.environ.pop("CC_ORCHESTRATOR_FAKE_PAYLOAD_BYTES", None)
+            else:
+                os.environ["CC_ORCHESTRATOR_FAKE_PAYLOAD_BYTES"] = old_payload
     finally:
         shutil.rmtree(mock_dir, ignore_errors=True)
     return {"ok": all(gates.values()), "gates": gates, "details": details}
@@ -4201,7 +5481,7 @@ def run_visible_agent(
         "bootstrap_path": str(bootstrap_path),
         "env": redact(env_for_log),
     }
-    (run_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_metadata(run_dir, metadata)
     subprocess.Popen(
         [
             "powershell",
@@ -4514,13 +5794,30 @@ def selftest() -> dict[str, Any]:
         run_id_rejected = True
     worker_env = build_worker_env({"ANTHROPIC_API_KEY": sample_api_key})
     secret_findings = secret_scan_text("OPENAI_API_KEY=sk-" + ("1" * 32), "selftest")
+    placeholder_findings = secret_scan_text("OPENAI_API_KEY=sk-your-placeholder-token", ".env.example")
     false_findings = secret_scan_text("input_tokens = estimate_tokens_from_text(prompt)", "selftest")
+    warning_risks = risk_summary([{"code": "soft_output", "severity": "medium", "blocking": False, "message": "warning only"}])
+    actual_route = actual_route_from_payload(
+        {"modelUsage": {"glm-5.2": {"inputTokens": 100, "outputTokens": 25, "costUSD": 0.12}}},
+        declared_model="qwen3.7-plus",
+    )
     status = workspace_status()
     policy = folder_policy(apply=False)
     prompt_pack = list_prompt_pack()
     with tempfile.TemporaryDirectory(prefix="cc-orchestrator-selftest-") as tmp:
         init_workspace(cwd=tmp, write_claude=False)
         clean_after_init = clean_workspace(cwd=tmp, dry_run=True)
+        chinese_root = Path(tmp) / "中文项目"
+        chinese_root.mkdir()
+        json_path = write_json_file(chinese_root / "metadata.json", {"prompt": "中文✅\x01", "path": str(chinese_root)})
+        json_roundtrip = json.loads(json_path.read_text(encoding="utf-8"))
+        change_split = classify_change_paths(
+            chinese_root,
+            [
+                ".agent-workspace/claude-code-orchestrator/runs/mock/stdout.txt",
+                "src/app.py",
+            ],
+        )
     checks = {
         "utf8_env": env.get("PYTHONIOENCODING") == "utf-8" and env.get("PYTHONUTF8") == "1",
         "timeout_bytes_decode": decoded == "中文✅",
@@ -4530,8 +5827,13 @@ def selftest() -> dict[str, Any]:
         "prompt_pack_available": bool(prompt_pack.get("ok")) and bool(prompt_pack.get("templates")),
         "claude_md_template": "Assigned role: review" in claude_md and CLAUDE_MD_MARKER_BEGIN in claude_md,
         "secret_redaction": sample_github_token not in redacted and sample_api_key not in redacted,
-        "secret_scan_detects_assignment": bool(secret_findings),
+        "secret_scan_detects_assignment": bool(secret_findings) and secret_findings[0].get("classification") == "real_secret_candidate",
+        "secret_scan_downgrades_placeholder": bool(placeholder_findings) and placeholder_findings[0].get("classification") == "placeholder_or_example" and not placeholder_findings[0].get("blocking"),
         "secret_scan_ignores_token_words": not false_findings,
+        "risk_warning_not_blocking": warning_risks.get("ok") and warning_risks.get("has_warnings") and warning_risks.get("blocking_count") == 0,
+        "actual_model_usage_detects_mismatch": actual_route.get("actual_model") == "glm-5.2" and actual_route.get("actual_total_tokens") == 125 and actual_route.get("route_mismatch"),
+        "utf8_json_roundtrip": json_roundtrip.get("prompt") == "中文✅�" and "中文项目" in str(json_roundtrip.get("path")),
+        "change_split_source_vs_artifact": change_split["project_source_changes"]["changed_count"] == 1 and change_split["agent_artifact_changes"]["changed_count"] == 1,
         "run_id_validation": run_id_rejected,
         "worker_env_allowlist": "ANTHROPIC_API_KEY" in worker_env and "GITHUB_TOKEN" not in worker_env and "NPM_TOKEN" not in worker_env,
         "mock_env_allowlist": "CC_ORCHESTRATOR_FAKE_STEPS" in PASSTHROUGH_ENV_KEYS,
@@ -4566,7 +5868,7 @@ def last_run(run_id: str | None = None, include_output: bool = True) -> dict[str
 
 
 def print_json(data: Any) -> None:
-    text = json.dumps(data, ensure_ascii=False, indent=2)
+    text = json.dumps(sanitize_for_json(data), ensure_ascii=False, indent=2)
     try:
         print(text)
     except UnicodeEncodeError:
@@ -4682,6 +5984,13 @@ def main() -> int:
     stream.add_argument("--cwd")
     stream.add_argument("--context")
     stream.add_argument("--no-include-partial-messages", action="store_true")
+    stream.add_argument("--max-output-bytes", type=int)
+    stream.add_argument("--max-events-bytes", type=int)
+    stream.add_argument("--soft-output-bytes", type=int)
+    stream.add_argument("--output-budget-policy", choices=["stop", "truncate"])
+    stream.add_argument("--kill-on-excessive-output", action="store_true")
+    stream.add_argument("--final-only", action="store_true")
+    stream.add_argument("--final-max-chars", type=int)
     poll = sub.add_parser("poll-run")
     poll.add_argument("--run-id", required=True)
     poll.add_argument("--stdout-offset", type=int, default=0)
@@ -4724,6 +6033,10 @@ def main() -> int:
     send.add_argument("--role")
     send.add_argument("--task-type")
     send.add_argument("--timeout-seconds", type=int)
+    send.add_argument("--no-preserve-route", action="store_true")
+    send.add_argument("--reroute", action="store_true")
+    send.add_argument("--route-profile")
+    send.add_argument("--route-model")
     team = sub.add_parser("spawn-role-team")
     team.add_argument("task")
     team.add_argument("--roles", default="requirements,architecture,security,testing")
@@ -4839,6 +6152,34 @@ def main() -> int:
     export.add_argument("--run-id")
     export.add_argument("--team-id")
     export.add_argument("--output-dir")
+    controller = sub.add_parser("controller-report")
+    controller.add_argument("--run-id")
+    controller.add_argument("--team-id")
+    controller.add_argument("--date")
+    controller.add_argument("--active-only", action="store_true")
+    controller.add_argument("--limit", type=int, default=50)
+    controller.add_argument("--output-dir")
+    pressure = sub.add_parser("pressure-report")
+    pressure.add_argument("--run-id")
+    pressure.add_argument("--team-id")
+    pressure.add_argument("--date")
+    pressure.add_argument("--active-only", action="store_true")
+    pressure.add_argument("--limit", type=int, default=50)
+    pressure.add_argument("--output-dir")
+    decision = sub.add_parser("decision-review")
+    decision.add_argument("proposed_action")
+    decision.add_argument("--task", default="")
+    decision.add_argument("--run-id")
+    decision.add_argument("--team-id")
+    decision.add_argument("--evidence")
+    decision.add_argument("--output-dir")
+    supervise = sub.add_parser("supervise-decision")
+    supervise.add_argument("proposed_action")
+    supervise.add_argument("--task", default="")
+    supervise.add_argument("--run-id")
+    supervise.add_argument("--team-id")
+    supervise.add_argument("--evidence")
+    supervise.add_argument("--output-dir")
     visible = sub.add_parser("run-visible")
     visible.add_argument("task")
     visible.add_argument("--role", default="implementation")
@@ -4914,6 +6255,13 @@ def main() -> int:
                     cwd=Path(args.cwd) if args.cwd else None,
                     context=args.context,
                     include_partial_messages=not args.no_include_partial_messages,
+                    max_output_bytes=args.max_output_bytes,
+                    max_events_bytes=args.max_events_bytes,
+                    soft_output_bytes=args.soft_output_bytes,
+                    output_budget_policy=args.output_budget_policy,
+                    kill_on_excessive_output=args.kill_on_excessive_output,
+                    final_only=args.final_only,
+                    final_max_chars=args.final_max_chars,
                 )
             )
         elif args.command == "poll-run":
@@ -4966,6 +6314,10 @@ def main() -> int:
                     role=args.role,
                     task_type=args.task_type,
                     timeout_seconds=args.timeout_seconds,
+                    preserve_route=not args.no_preserve_route,
+                    reroute=args.reroute,
+                    route_profile=args.route_profile,
+                    route_model=args.route_model,
                 )
             )
         elif args.command == "spawn-role-team":
@@ -5091,6 +6443,28 @@ def main() -> int:
             print_json(open_run_folder(args.run_id, open_folder=not args.no_open))
         elif args.command == "export-report":
             print_json(export_report(run_id=args.run_id, team_id=args.team_id, output_dir=Path(args.output_dir) if args.output_dir else None))
+        elif args.command in {"controller-report", "pressure-report"}:
+            print_json(
+                controller_report(
+                    run_id=args.run_id,
+                    team_id=args.team_id,
+                    date=args.date,
+                    include_finished=not args.active_only,
+                    limit=args.limit,
+                    output_dir=Path(args.output_dir) if args.output_dir else None,
+                )
+            )
+        elif args.command in {"decision-review", "supervise-decision"}:
+            print_json(
+                decision_review(
+                    task=args.task,
+                    proposed_action=args.proposed_action,
+                    run_id=args.run_id,
+                    team_id=args.team_id,
+                    evidence=args.evidence,
+                    output_dir=Path(args.output_dir) if args.output_dir else None,
+                )
+            )
         elif args.command == "run-visible":
             print_json(
                 run_visible_agent(

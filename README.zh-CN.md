@@ -24,7 +24,7 @@
   <a href="README.md"><img alt="Language: English" src="https://img.shields.io/badge/README-English-black"></a>
   <a href="README.md"><img alt="Default README: English" src="https://img.shields.io/badge/Default-English-blue"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-brightgreen"></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-v0.5.1-black">
+  <img alt="Version" src="https://img.shields.io/badge/version-v0.6.2-black">
   <img alt="Codex Skill" src="https://img.shields.io/badge/Codex-Skill-0A0A0A">
   <img alt="MCP Included" src="https://img.shields.io/badge/MCP-Included-blue">
   <img alt="CCSwitch" src="https://img.shields.io/badge/CCSwitch-Model_Router-purple">
@@ -80,11 +80,14 @@ Skill = Codex 的操作说明书
 <h2 align="center">更新日志</h2>
 
 <p align="center">
-  <b>当前版本：v0.5.1</b>
+  <b>当前版本：v0.6.2</b>
 </p>
 
 | 版本 | 更新内容 | 为什么重要 |
 | --- | --- | --- |
+| `v0.6.2` | 修复 #15：捕获 Claude stream 里的 `modelUsage`，写成 `actual_model_usage`；metadata、dashboard、usage summary、控制报告都会区分“声明路由模型”和“实际计费模型”，并标出 `route_mismatch`。新增 `supervise-decision`，作为 `decision-review` 的兼容别名。 | Codex 现在能发现“看起来派了 A 模型，实际 Claude 用了 B 模型”的坑。路由、账单、报告都更可信。 |
+| `v0.6.1` | 完成 GitHub issue 审核补丁：控制报告补齐按模型统计、每个 run 的耗时、token 估算、stdout/events 字节、warning/blocking 计数；dashboard 增加 token 估算；旧 metadata 写入也统一走 UTF-8/控制字符清洗。 | 这些 issue 不是“看起来关了”，而是能拿出更完整的验收证据。Codex 不用翻 raw 日志，也能判断 worker 到底跑得好不好。 |
+| `v0.6.0` | 修复 GitHub issues #3-#12：角色团队事务化启动、输出/事件硬预算、final-only 模式、追加指令保留原模型、Windows UTF-8 检查、风险等级拆分、密钥扫描分类、源码/Agent 产物分离、运维面板、控制报告、监督决策审查。 | Codex 现在更像真正的总控：团队不会半启动后偷偷留下 worker，输出跑飞会被停，模型路线不会悄悄漂移，风险和验收证据也能导出成报告。 |
 | `v0.5.1` | 修复 GitHub issues #1 和 #2：轻量 `tools/cc-orchestrator` 复制布局现在能找到 `version.json` 和 Prompt Pack；`clean-workspace` 不再提示删除刚初始化出来的骨架目录。 | 工作区治理更稳：轻量工具目录可以独立运行，清理命令也不会把初始化结果拆掉。 |
 | `v0.5.0` | 新增工作区治理：`.agent-workspace` 产物路由、`init-workspace`、`workspace-status`、`migrate-data`、`clean-workspace`、`archive-runs`、`repair-mcp-paths`、`folder-policy`，并补齐对应 MCP 工具。 | Codex 现在能把 Claude Code worker 的日志、报告、看板、临时文件、回滚记录、模板和策略文件关进统一目录，不乱碰项目源码。 |
 | `v0.4.1` | 新增滚动 `checkpoint-###.md` 总结、工具调用去重摘要、默认写入总控摘要文件的 controller poll，以及明确的 `queued/running/done/failed` 队列状态。 | Codex 平时只看决策级摘要，raw 日志继续留在磁盘审计，既省额度又更好控场。 |
@@ -94,6 +97,47 @@ Skill = Codex 的操作说明书
 | `v0.1.0` | 完成 Skill + MCP + CLI 基座：CCSwitch 发现、模型评分、角色路由、`CLAUDE.md` 生成、可视 Claude Code 窗口、日志和安全默认值。 | 证明核心思路：Codex 当大脑，Claude Code 当执行层，CCSwitch 当本地模型路由器。 |
 
 <h3 align="center">详细版本说明</h3>
+
+<details open>
+<summary><b>v0.6.2 - 实际模型归因</b></summary>
+
+- 修复 #15：streaming run 会把 Claude result 里的 `modelUsage` 保存为 `actual_model_usage`。
+- run metadata/status 新增 `actual_model`、`actual_cost_usd`、`actual_total_tokens`、`route_mismatch`。
+- `detect_failure_modes` 发现声明模型和实际模型不一致时，会产生高风险 `route_mismatch`。
+- `usage-summary` 优先按实际模型统计，同时保留声明模型字段。
+- dashboard 和控制报告会显示声明模型、实际模型、是否 mismatch、实际成本。
+- `healthcheck` 增加说明：实际模型以 Claude stream result 为准。
+- 新增 `supervise-decision`，作为 `decision-review` 的兼容别名，方便 #14 里的复测命令直接通过。
+
+</details>
+
+<details open>
+<summary><b>v0.6.1 - issue 审核补丁</b></summary>
+
+- `controller-report` / `pressure-report` Markdown 补齐按模型统计、总耗时、token 估算、输出字节、事件字节、预算停止次数、warning/blocking 计数和最高风险等级。
+- 每个 run 的报告行新增耗时、token 估算、stdout/events 字节、warning/blocking 计数、预算状态、源码/产物变化数量。
+- 本地运维 dashboard 的输出预算区域新增 token 估算。
+- `usage-summary` 和按模型统计新增 warning/blocking 风险计数。
+- 旧的 metadata 写入路径也统一使用 UTF-8/控制字符清洗，中文路径和中文 prompt 更稳。
+
+</details>
+
+<details open>
+<summary><b>v0.6.0 - 总控运维加固</b></summary>
+
+- 修复 #4：`spawn-role-team` 会先检查团队容量；如果中途失败，会停止已经启动的 run，不再静默留下 worker。
+- 修复 #5：`run-streaming` / `cc_run_streaming_agent` 新增 `max_output_bytes`、`max_events_bytes`、`soft_output_bytes`、`output_budget_policy`、`kill_on_excessive_output`、`final_only`、`final_max_chars`。
+- 修复 #6：`send-instruction` 默认保留上一次的 profile/model；如果显式改路由，会写入 route drift。
+- 修复 #7：metadata、events、CLI JSON、dashboard 都会清洗非法控制字符，并保持中文路径和中文 prompt 的 UTF-8 可读。
+- 修复 #8：风险结果新增 `blocking_ok`、`has_warnings`、`max_severity`、`warning_count`、`blocking_count`；旧 `ok` 保留，含义是“没有阻塞级风险”。
+- 修复 #9：密钥扫描会区分真疑似密钥、示例值、变量名、配置键名和待人工复核项，输出永远脱敏。
+- 修复 #10：run diff 和 diff summary 会分开显示项目源码改动和 `.agent-workspace` 里的 Agent 产物改动。
+- 修复 #11：dashboard 升级成运维面板，显示 worker 筛选、心跳、停止原因、输出预算、风险等级、路由漂移、源码/产物分离。
+- 修复 #12：新增 `controller-report` / `pressure-report`，以及 MCP `cc_controller_report` / `cc_pressure_report`，用于导出验收报告。
+- 新增 #3 MVP：`decision-review` 和 MCP `cc_decision_review` 会生成监督审查结果：approve / revise / block、置信度、反对点、缺失证据和必须修改项。
+- `mock-stream-test` 新增输出预算压测，不消耗真实模型额度。
+
+</details>
 
 <details open>
 <summary><b>v0.5.1 - 便携资产和安全清理</b></summary>
@@ -541,6 +585,9 @@ Codex 可以调用这些工具：
 | `cc_dashboard` | 生成本地 HTML worker 面板 |
 | `cc_open_run_folder` | 打开或返回某次 run 日志目录 |
 | `cc_export_report` | 导出 run 或 team 的 Markdown 报告 |
+| `cc_controller_report` | 导出总控验收和压测证据报告 |
+| `cc_pressure_report` | 压测报告别名 |
+| `cc_decision_review` | 监督式 approve/revise/block 决策审查 |
 | `cc_run_visible_agent` | 打开可视 Claude Code 窗口 |
 | `cc_last_run` | 查看最后一次运行 |
 | `cc_git_diff` | 查看子 Agent 修改后的 diff |

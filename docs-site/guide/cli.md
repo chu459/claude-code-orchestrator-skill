@@ -131,11 +131,16 @@ python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" compact-events --run-id <run_i
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" run-status
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" stop-run --run-id <run_id> --force
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" mock-stream-test
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" run-streaming "Noisy task" --role testing --max-output-bytes 200000 --kill-on-excessive-output
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" controller-report --limit 20
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" decision-review "accept worker result" --run-id <run_id> --evidence "verify-run passed"
 ```
 
 `poll-run` defaults to controller mode. It returns compact progress, risk flags, changed files, a timeline, deduplicated tool-call summary, and rolling checkpoint paths instead of dumping raw events.
 
 `mock-stream-test` uses a fake Claude stream, so it checks `events.ndjson`, polling, status, and stop without spending model quota.
+
+`run-streaming` can enforce output budgets. Use `--final-only` for noisy tasks and `--kill-on-excessive-output` when a runaway worker should be stopped.
 
 ## Write scope and acceptance
 
