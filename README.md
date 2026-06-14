@@ -15,7 +15,7 @@
 <p align="center">
   <a href="README.zh-CN.md"><img alt="README: 中文" src="https://img.shields.io/badge/README-中文-red"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-brightgreen"></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-v0.4.1-black">
+  <img alt="Version" src="https://img.shields.io/badge/version-v0.5.0-black">
   <img alt="Codex Skill" src="https://img.shields.io/badge/Codex-Skill-0A0A0A">
   <img alt="MCP Included" src="https://img.shields.io/badge/MCP-Included-blue">
   <img alt="CCSwitch" src="https://img.shields.io/badge/CCSwitch-Model_Router-purple">
@@ -30,18 +30,35 @@
 <h2 align="center">Latest Updates</h2>
 
 <p align="center">
-  <b>Current version: v0.4.1</b>
+  <b>Current version: v0.5.0</b>
 </p>
 
 | Version | What changed | Why it matters |
 | --- | --- | --- |
+| `v0.5.0` | Added workspace governance: `.agent-workspace` artifact routing, `init-workspace`, `workspace-status`, `migrate-data`, `clean-workspace`, `archive-runs`, `repair-mcp-paths`, and `folder-policy`, with matching MCP tools. | Codex can now keep Claude Code worker logs, reports, dashboards, temp files, rollback notes, templates, and policies inside one managed folder without touching project source. |
 | `v0.4.1` | Added rolling `checkpoint-###.md` summaries, deduplicated tool-call summaries, default artifact-writing controller poll, and exact `queued/running/done/failed` queue states. | Codex can now inspect only decision-grade summaries while workers keep raw audit logs on disk. |
 | `v0.4.0` | Added the Codex Controller Playbook, Prompt Pack, compact controller-mode polling, `cc_summarize_run`, `cc_compact_events`, one-click verification scoring, real queue policy, model registry, local override preservation, worker quality history, failure-mode detection, and timeline dashboard. | Codex can now manage Claude Code workers like a real controller: watch compact progress, stop bad runs, verify changes, learn which model is best, and preserve local preferences across upgrades. |
 | `v0.3.0` | Added `cc_verify_run`, hard write-scope checks, mock streaming E2E tests, queue scheduling, usage summaries, upgrade checks, MCP auto-registration, and benchmark suite. | Turns the project from “can run workers” into a safer control console with verification, migration, and low-cost testing. |
-| `v0.2.x` | Added live streaming control: `run-streaming`, `poll-run`, `stop-run`, `run-status`, team spawning, cross review, dashboard, reports, and cost guard. | Codex can watch and manage Claude Code workers in real time instead of waiting blindly. |
-| `v0.1.x` | Built the first Skill + MCP + CLI foundation with CCSwitch profile discovery, model scoring, role routing, `CLAUDE.md` generation, visible Claude Code windows, logs, and safe defaults. | Proved the core idea: Codex is the brain, Claude Code is the worker layer, CCSwitch is the local model router. |
+| `v0.2.0` | Added live streaming control: `run-streaming`, `poll-run`, `stop-run`, `run-status`, team spawning, cross review, dashboard, reports, and cost guard. | Codex can watch and manage Claude Code workers in real time instead of waiting blindly. |
+| `v0.1.0` | Built the first Skill + MCP + CLI foundation with CCSwitch profile discovery, model scoring, role routing, `CLAUDE.md` generation, visible Claude Code windows, logs, and safe defaults. | Proved the core idea: Codex is the brain, Claude Code is the worker layer, CCSwitch is the local model router. |
 
 <h3 align="center">Detailed Version Notes</h3>
+
+<details open>
+<summary><b>v0.5.0 - Workspace Governance</b></summary>
+
+- Added `.agent-workspace/claude-code-orchestrator` as the default home for agent-generated artifacts.
+- Added `init-workspace` to create runs, reports, dashboard, archives, rollback, logs, tmp, templates, and policies folders.
+- Added `workspace-status` to show exactly where Codex and Claude Code will write artifacts.
+- Added `migrate-data` to safely move legacy `runs`, `reports`, and `dashboard` data into the managed workspace.
+- Added `clean-workspace`, dry-run by default, to clean tmp files, empty folders, and expired run folders.
+- Added `archive-runs` to zip old run folders into `archives/`.
+- Added `repair-mcp-paths` to update `.mcp.json` with `CC_ORCHESTRATOR_WORKSPACE_ROOT` and `CC_ORCHESTRATOR_ARTIFACT_ROOT`.
+- Added `folder-policy` to write a machine-readable rule: manage only agent artifacts, never project source.
+- Added matching MCP tools: `cc_init_workspace`, `cc_workspace_status`, `cc_migrate_data`, `cc_clean_workspace`, `cc_archive_runs`, `cc_repair_mcp_paths`, and `cc_folder_policy`.
+- Updated worker prompts and generated `CLAUDE.md` so Claude Code workers keep logs, reports, temp files, and rollback notes under the managed artifact root.
+
+</details>
 
 <details open>
 <summary><b>v0.4.1 - Controller Checkpoints, Tool Dedup, Queue State Polish</b></summary>
@@ -95,7 +112,7 @@
 </details>
 
 <details>
-<summary><b>v0.2.x - Live Worker Control</b></summary>
+<summary><b>v0.2.0 - Live Worker Control</b></summary>
 
 - Added `run-streaming` / `cc_run_streaming_agent`.
 - Started Claude Code with `--output-format stream-json --include-partial-messages`.
@@ -112,7 +129,7 @@
 </details>
 
 <details>
-<summary><b>v0.1.x - Skill, MCP, CLI, and CCSwitch Foundation</b></summary>
+<summary><b>v0.1.0 - Skill, MCP, CLI, and CCSwitch Foundation</b></summary>
 
 - Created the Codex Skill entrypoint.
 - Added bundled MCP server.
@@ -174,7 +191,8 @@ It lets Codex:
 - route agents to the best local model
 - launch Claude Code as an external worker
 - keep runs read-only by default
-- save run metadata and logs
+- save run metadata and logs under `.agent-workspace/claude-code-orchestrator`
+- initialize, inspect, clean, migrate, archive, and govern agent artifact folders
 - expose everything through MCP tools
 - handle Windows UTF-8 output safely
 - write a project `CLAUDE.md` so Claude Code workers receive stable role/persona instructions
@@ -202,7 +220,7 @@ The Skill is most powerful when CCSwitch has several models with different stren
 Paste this into Codex:
 
 ```text
-Install the Codex Skill and MCP server from https://github.com/chu459/claude-code-orchestrator-skill. Put the Skill at ~/.codex/skills/claude-code-orchestrator, wire the bundled MCP server into Codex config.toml, run selftest, healthcheck, score-models, and show me the selected multi-agent routing plan. Do not print secrets.
+Install the Codex Skill and MCP server from https://github.com/chu459/claude-code-orchestrator-skill. Put the Skill at ~/.codex/skills/claude-code-orchestrator, wire the bundled MCP server into Codex config.toml, run selftest, healthcheck, score-models, init-workspace, workspace-status, and show me the selected multi-agent routing plan. Do not print secrets.
 ```
 
 <h2 align="center">Install</h2>
@@ -242,6 +260,8 @@ args = [
 [mcp_servers.claude-code-orchestrator.env]
 PYTHONIOENCODING = "utf-8"
 PYTHONUTF8 = "1"
+CC_ORCHESTRATOR_WORKSPACE_ROOT = "."
+CC_ORCHESTRATOR_ARTIFACT_ROOT = ".agent-workspace/claude-code-orchestrator"
 ```
 
 Or let the safe installer write Codex/Claude MCP config after backing up existing files:
@@ -257,6 +277,8 @@ export CC_ORCHESTRATOR_HOME="$HOME/.codex/skills/claude-code-orchestrator/script
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" selftest
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" healthcheck
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" score-models
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" init-workspace --cwd .
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" workspace-status --cwd .
 ```
 
 <h2 align="center">Common Commands</h2>
@@ -283,6 +305,14 @@ Write strategy reports:
 
 ```bash
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" write-reports
+```
+
+Initialize and inspect the managed workspace:
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" init-workspace --cwd /path/to/project
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" workspace-status --cwd /path/to/project
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" folder-policy --cwd /path/to/project --apply
 ```
 
 Write a `CLAUDE.md` worker persona into a project:
@@ -337,6 +367,13 @@ python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" benchmark-suite --profile PROF
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" calibrate-policy --preference coding=glm-5 --preference multimodal=qwen3.7-plus
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" cost-guard --max-concurrent 4 --max-timeout-seconds 1200 --apply
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" usage-summary --write-report
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" init-workspace
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" workspace-status
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" migrate-data
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" clean-workspace
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" archive-runs --older-than-days 30
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" repair-mcp-paths --create
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" folder-policy --apply
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" queue-submit "Review this repo" --role review --priority 100
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" queue-tick --max-concurrent 3
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" queue-policy --max-concurrent 3 --default-timeout-seconds 900 --apply
@@ -403,6 +440,13 @@ python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" last-run
 | `cc_queue_policy` | Read or write queue concurrency, retry, and timeout policy |
 | `cc_upgrade_check` | Preserve local model preferences across upgrades |
 | `cc_mock_stream_test` | Test streaming/poll/stop/status with a fake Claude stream |
+| `cc_init_workspace` | Initialize `.agent-workspace`, templates, policy files, rollback/log dirs, and optional `CLAUDE.md` |
+| `cc_workspace_status` | Show exactly where Codex and Claude Code artifacts will be written |
+| `cc_migrate_data` | Dry-run or move legacy `runs`, `reports`, and `dashboard` into the managed workspace |
+| `cc_clean_workspace` | Clean tmp files, empty dirs, and expired run artifacts, dry-run by default |
+| `cc_archive_runs` | Zip old run folders under `archives/` |
+| `cc_repair_mcp_paths` | Repair `.mcp.json` so MCP writes into the managed workspace |
+| `cc_folder_policy` | Return or write the rule that only agent artifacts are managed |
 | `cc_dashboard` | Generate a local HTML worker dashboard |
 | `cc_open_run_folder` | Open or return a run log folder |
 | `cc_export_report` | Export a run or team Markdown report |
@@ -517,7 +561,7 @@ flowchart TD
   Router --> ClaudeMD["Project CLAUDE.md"]
   ClaudeMD --> ClaudeCode["Claude Code Worker Process"]
   Router --> ClaudeCode
-  ClaudeCode --> Runs["runs/<run_id> logs"]
+  ClaudeCode --> Runs[".agent-workspace/claude-code-orchestrator/runs/<run_id> logs"]
   Runs --> Codex
 ```
 
@@ -533,6 +577,7 @@ The default posture is intentionally conservative:
 - UTF-8-safe output on Windows
 - timeout output is preserved when Python exposes partial stdout/stderr
 - existing `CLAUDE.md` files are not overwritten unless `--append` or `--force` is used
+- workspace governance manages only `.agent-workspace/claude-code-orchestrator` artifacts, not project source
 
 <h2 align="center">Live Progress</h2>
 
@@ -548,15 +593,15 @@ What works today:
 Windows:
 
 ```powershell
-Get-Content "$env:CC_ORCHESTRATOR_HOME\runs\<run_id>\stdout.txt" -Wait
-Get-Content "$env:CC_ORCHESTRATOR_HOME\runs\<run_id>\events.ndjson" -Wait
+Get-Content ".agent-workspace\claude-code-orchestrator\runs\<run_id>\stdout.txt" -Wait
+Get-Content ".agent-workspace\claude-code-orchestrator\runs\<run_id>\events.ndjson" -Wait
 ```
 
 macOS / Linux:
 
 ```bash
-tail -f "$CC_ORCHESTRATOR_HOME/runs/<run_id>/stdout.txt"
-tail -f "$CC_ORCHESTRATOR_HOME/runs/<run_id>/events.ndjson"
+tail -f ".agent-workspace/claude-code-orchestrator/runs/<run_id>/stdout.txt"
+tail -f ".agent-workspace/claude-code-orchestrator/runs/<run_id>/events.ndjson"
 ```
 
 The P0 live-control loop is:
@@ -626,6 +671,9 @@ It is about bringing model cost, context cost, worker cost, and human attention 
 - [x] Worker quality scoring
 - [x] Failure-mode detection
 - [x] Queue policy with priority, retry, timeout, and max concurrency
+- [x] `.agent-workspace` artifact routing
+- [x] Workspace init/status/migration/cleanup/archive tools
+- [x] MCP path repair and folder policy
 - [x] Daily update monitor automation
 - [x] Web-style local dashboard
 - [ ] Agent result voting

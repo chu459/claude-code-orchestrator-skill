@@ -1,6 +1,7 @@
 runs/
 reports/
 dashboard/
+.agent-workspace/
 __pycache__/
 scripts/cc-orchestrator/config/model_calibration.json
 scripts/cc-orchestrator/config/model_registry.json

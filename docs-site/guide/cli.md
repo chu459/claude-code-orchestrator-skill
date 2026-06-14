@@ -24,6 +24,27 @@ python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" list-profiles
 
 Use these before running workers.
 
+## Workspace governance
+
+Initialize the managed artifact workspace:
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" init-workspace --cwd /path/to/project
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" workspace-status --cwd /path/to/project
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" folder-policy --cwd /path/to/project --apply
+```
+
+Maintain old or noisy artifacts:
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" migrate-data --cwd /path/to/project
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" clean-workspace --cwd /path/to/project
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" archive-runs --cwd /path/to/project --older-than-days 30
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" repair-mcp-paths --cwd /path/to/project --create
+```
+
+These commands manage agent-generated artifacts only. Destructive or path-changing actions are preview-first unless `--apply` is passed.
+
 ## Routing
 
 Pick a route without launching Claude Code:
@@ -48,7 +69,7 @@ python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" write-reports
 
 `write-auto-policy` updates routing aliases so local models are selected by role.
 
-`write-reports` writes model score and strategy reports under the orchestrator.
+`write-reports` writes model score and strategy reports under `.agent-workspace/claude-code-orchestrator/reports`.
 
 ## Run workers
 
@@ -81,7 +102,7 @@ python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" verify-run --run-id <run_id> -
 Runs are stored under:
 
 ```text
-scripts/cc-orchestrator/runs/<run_id>/
+.agent-workspace/claude-code-orchestrator/runs/<run_id>/
   metadata.json
   prompt.txt
   stdout.txt
@@ -91,13 +112,13 @@ scripts/cc-orchestrator/runs/<run_id>/
 On Windows, tail stdout:
 
 ```powershell
-Get-Content "$env:CC_ORCHESTRATOR_HOME\runs\<run_id>\stdout.txt" -Wait
+Get-Content ".agent-workspace\claude-code-orchestrator\runs\<run_id>\stdout.txt" -Wait
 ```
 
 On macOS or Linux:
 
 ```bash
-tail -f "$CC_ORCHESTRATOR_HOME/runs/<run_id>/stdout.txt"
+tail -f ".agent-workspace/claude-code-orchestrator/runs/<run_id>/stdout.txt"
 ```
 
 ## Live control

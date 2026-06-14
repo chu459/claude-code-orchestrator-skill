@@ -2,7 +2,7 @@
 
 Local MCP server that lets Codex control Claude Code through CCSwitch profiles.
 
-The server discovers CCSwitch from environment variables and the current user home, reads the CCSwitch database as a model/profile registry, chooses a profile/model from configurable routing rules, injects the selected provider environment into a single `claude` subprocess, and stores each run under `runs/`.
+The server discovers CCSwitch from environment variables and the current user home, reads the CCSwitch database as a model/profile registry, chooses a profile/model from configurable routing rules, injects the selected provider environment into a single `claude` subprocess, and stores runtime artifacts under `.agent-workspace/claude-code-orchestrator/`.
 
 ## Tools
 
@@ -38,6 +38,13 @@ The server discovers CCSwitch from environment variables and the current user ho
 - `cc_queue_submit`, `cc_queue_tick`, `cc_queue_status`, `cc_queue_cancel`, and `cc_queue_policy` provide priority queue scheduling.
 - `cc_upgrade_check` records version state while preserving local calibration, overrides, model registry, quality history, queue policy, and cost settings.
 - `cc_mock_stream_test` validates streaming/poll/stop/status with a fake Claude stream.
+- `cc_init_workspace` initializes `.agent-workspace`, templates, policy files, rollback/log dirs, and optional `CLAUDE.md`.
+- `cc_workspace_status` shows where Codex and Claude Code artifacts will be written.
+- `cc_migrate_data` previews or moves legacy `runs`, `reports`, and `dashboard` into the managed workspace.
+- `cc_clean_workspace` cleans tmp files, empty dirs, and expired run folders; dry-run by default.
+- `cc_archive_runs` zips selected or old run folders under `archives/`.
+- `cc_repair_mcp_paths` repairs `.mcp.json` workspace/artifact env values.
+- `cc_folder_policy` returns or writes the rule that only agent-generated artifacts are managed.
 - `cc_dashboard` generates a local HTML worker dashboard.
 - `cc_open_run_folder` opens or returns a run log directory.
 - `cc_export_report` writes a Markdown report for a run or team.
@@ -56,7 +63,7 @@ Write access is disabled by default in `config/model_policy.json`. A caller must
 - CLI and MCP JSON output force UTF-8 so Chinese text and symbols do not crash Windows GBK consoles.
 - Child Claude Code runs receive UTF-8 Python environment variables, and visible PowerShell sessions set UTF-8 input/output encoding.
 - Streaming runs write `events.ndjson` in real time from Claude Code `--output-format stream-json --verbose --include-partial-messages`.
-- If a run times out, the orchestrator stores any partial stdout/stderr that Python exposes in `runs/<run_id>/stdout.txt` and `stderr.txt`.
+- If a run times out, the orchestrator stores any partial stdout/stderr that Python exposes in `.agent-workspace/claude-code-orchestrator/runs/<run_id>/stdout.txt` and `stderr.txt`.
 - Use `stop-run` / `cc_stop_run` for runaway workers. It requires an explicit run id.
 - For large multi-agent work, prefer several short role-specific prompts over one broad prompt. Then use `last-run` or `cc_last_run` to inspect saved tails before retrying.
 
@@ -86,6 +93,13 @@ python tools\cc-orchestrator\cc_orchestrator.py list-profiles
 python tools\cc-orchestrator\cc_orchestrator.py score-models
 python tools\cc-orchestrator\cc_orchestrator.py write-auto-policy
 python tools\cc-orchestrator\cc_orchestrator.py write-reports
+python tools\cc-orchestrator\cc_orchestrator.py init-workspace --cwd .
+python tools\cc-orchestrator\cc_orchestrator.py workspace-status --cwd .
+python tools\cc-orchestrator\cc_orchestrator.py migrate-data --cwd .
+python tools\cc-orchestrator\cc_orchestrator.py clean-workspace --cwd .
+python tools\cc-orchestrator\cc_orchestrator.py archive-runs --cwd . --older-than-days 30
+python tools\cc-orchestrator\cc_orchestrator.py repair-mcp-paths --cwd . --create
+python tools\cc-orchestrator\cc_orchestrator.py folder-policy --cwd . --apply
 python tools\cc-orchestrator\cc_orchestrator.py write-claude-md --cwd . --role implementation
 python tools\cc-orchestrator\cc_orchestrator.py pick --role implementation --task-type complex_code
 python tools\cc-orchestrator\cc_orchestrator.py workflow-plan "Fix the bug"

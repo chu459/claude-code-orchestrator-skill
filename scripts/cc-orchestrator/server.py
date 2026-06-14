@@ -14,11 +14,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from cc_orchestrator import (
     ROLE_ORDER,
     OrchestratorError,
+    archive_runs,
     build_model_registry,
     benchmark_suite,
     benchmark_model,
     calibrate_policy,
     check_write_scope,
+    clean_workspace,
     collect_team_results,
     compact_events,
     cost_guard,
@@ -27,7 +29,9 @@ from cc_orchestrator import (
     daily_usage_summary,
     diff_summary,
     export_report,
+    folder_policy,
     healthcheck,
+    init_workspace,
     git_diff,
     last_run,
     list_profiles,
@@ -35,6 +39,7 @@ from cc_orchestrator import (
     score_models,
     resolve_route,
     get_provider,
+    migrate_data,
     poll_run,
     preflight_write_scope,
     queue_cancel,
@@ -48,6 +53,7 @@ from cc_orchestrator import (
     run_streaming_agent,
     run_visible_agent,
     run_workflow_plan,
+    repair_mcp_paths,
     secret_scan_run,
     send_instruction,
     local_policy_override,
@@ -60,6 +66,7 @@ from cc_orchestrator import (
     mock_stream_test,
     upgrade_check,
     verify_run,
+    workspace_status,
     write_claude_md,
     write_reports,
 )
@@ -371,6 +378,62 @@ class MockStreamTestInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
     timeout_seconds: int = Field(default=20, ge=5, le=120)
+
+
+class InitWorkspaceInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    cwd: Optional[str] = Field(default=None, description="Project directory. Defaults to MCP server cwd.")
+    role: str = Field(default="development", description=ROLE_DESCRIPTION)
+    write_claude_md: bool = Field(default=True, description="Create or update the managed CLAUDE.md section.")
+    repair_mcp: bool = Field(default=False, description="Also repair/create .mcp.json path env values.")
+
+
+class WorkspaceStatusInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    cwd: Optional[str] = Field(default=None, description="Project directory. Defaults to MCP server cwd.")
+
+
+class MigrateDataInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    cwd: Optional[str] = None
+    apply: bool = Field(default=False, description="Actually move old runs/reports/dashboard. Defaults to dry-run.")
+
+
+class CleanWorkspaceInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    cwd: Optional[str] = None
+    older_than_days: int = Field(default=30, ge=0, le=3650)
+    dry_run: bool = Field(default=True, description="Preview only by default.")
+
+
+class ArchiveRunsInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    cwd: Optional[str] = None
+    older_than_days: int = Field(default=30, ge=0, le=3650)
+    run_ids: list[str] = Field(default_factory=list)
+    apply: bool = Field(default=False, description="Actually write the zip archive.")
+    remove: bool = Field(default=False, description="Remove archived run folders after apply=true.")
+
+
+class RepairMcpPathsInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    cwd: Optional[str] = None
+    mcp_path: Optional[str] = Field(default=None, description="Optional .mcp.json path. Relative paths resolve under cwd.")
+    create: bool = Field(default=False, description="Create .mcp.json if it does not exist.")
+    apply: bool = Field(default=False, description="Write changes. Defaults to dry-run.")
+
+
+class FolderPolicyInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    cwd: Optional[str] = None
+    apply: bool = Field(default=False, description="Write policies/folder-policy.json.")
 
 
 class DashboardInput(BaseModel):
@@ -950,6 +1013,69 @@ async def cc_mock_stream_test(params: MockStreamTestInput) -> str:
     """Run a fake Claude stream to test events.ndjson, poll, status, and stop without spending model quota."""
     try:
         return _json(mock_stream_test(timeout_seconds=params.timeout_seconds))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_init_workspace", annotations={"title": "Initialize Agent Workspace", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
+async def cc_init_workspace(params: InitWorkspaceInput) -> str:
+    """Initialize .agent-workspace, templates, policy files, rollback/log dirs, and optional CLAUDE.md."""
+    try:
+        return _json(init_workspace(cwd=params.cwd, role=params.role, write_claude=params.write_claude_md, repair_mcp=params.repair_mcp))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_workspace_status", annotations={"title": "Workspace Artifact Status", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
+async def cc_workspace_status(params: WorkspaceStatusInput) -> str:
+    """Show where Codex and Claude Code artifacts will be written."""
+    try:
+        return _json(workspace_status(cwd=params.cwd))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_migrate_data", annotations={"title": "Migrate Legacy Artifact Data", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False})
+async def cc_migrate_data(params: MigrateDataInput) -> str:
+    """Move legacy runs/reports/dashboard into the managed workspace when apply=true."""
+    try:
+        return _json(migrate_data(cwd=params.cwd, apply=params.apply))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_clean_workspace", annotations={"title": "Clean Agent Workspace", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False})
+async def cc_clean_workspace(params: CleanWorkspaceInput) -> str:
+    """Clean tmp files, empty dirs, and expired run artifacts. Dry-run by default."""
+    try:
+        return _json(clean_workspace(cwd=params.cwd, older_than_days=params.older_than_days, dry_run=params.dry_run))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_archive_runs", annotations={"title": "Archive Old Runs", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False})
+async def cc_archive_runs(params: ArchiveRunsInput) -> str:
+    """Zip selected or old run folders under archives/. Removal is optional and explicit."""
+    try:
+        return _json(archive_runs(cwd=params.cwd, older_than_days=params.older_than_days, run_ids=params.run_ids, apply=params.apply, remove=params.remove))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_repair_mcp_paths", annotations={"title": "Repair MCP Artifact Paths", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False})
+async def cc_repair_mcp_paths(params: RepairMcpPathsInput) -> str:
+    """Repair .mcp.json so MCP artifacts point at the managed workspace."""
+    try:
+        return _json(repair_mcp_paths(cwd=params.cwd, mcp_path=params.mcp_path, apply=params.apply, create=params.create))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_folder_policy", annotations={"title": "Agent Folder Policy", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
+async def cc_folder_policy(params: FolderPolicyInput) -> str:
+    """Return or write the policy that limits agent-generated artifacts to managed folders."""
+    try:
+        return _json(folder_policy(cwd=params.cwd, apply=params.apply))
     except Exception as exc:
         return _error(exc)
 

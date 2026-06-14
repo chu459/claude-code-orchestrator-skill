@@ -1,6 +1,6 @@
 ---
 name: claude-code-orchestrator
-description: Control Claude Code as an external sub-agent through the local cc-orchestrator MCP/CLI and CCSwitch profiles. Use when the user asks Codex to use Claude Code, CCSwitch, external model routing, visible Claude Code windows, ClaudeCode as subagents, MCP control of Claude Code, or a configurable multi-agent workflow where Codex is the controller and Claude Code agents are workers.
+description: Control Claude Code as an external sub-agent through the local cc-orchestrator MCP/CLI and CCSwitch profiles, with .agent-workspace governance for logs, reports, dashboards, archives, rollback notes, templates, policies, and MCP path repair. Use when the user asks Codex to use Claude Code, CCSwitch, external model routing, visible Claude Code windows, ClaudeCode as subagents, MCP control of Claude Code, configurable multi-agent workflows, workspace/status/cleanup/migration/archive of Claude Code run artifacts, repair .mcp.json paths, or folder policies where Codex is the controller and Claude Code agents are workers.
 ---
 
 # Claude Code Orchestrator
@@ -67,6 +67,26 @@ Fast self-test for UTF-8 handling and required config files:
 ```powershell
 python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" selftest
 ```
+
+Initialize and inspect the managed agent workspace:
+
+```powershell
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" init-workspace --cwd "PROJECT_PATH"
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" workspace-status --cwd "PROJECT_PATH"
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" folder-policy --cwd "PROJECT_PATH" --apply
+```
+
+Move and maintain old agent artifacts safely:
+
+```powershell
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" migrate-data --cwd "PROJECT_PATH"
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" migrate-data --cwd "PROJECT_PATH" --apply
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" clean-workspace --cwd "PROJECT_PATH"
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" archive-runs --cwd "PROJECT_PATH" --older-than-days 30
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" repair-mcp-paths --cwd "PROJECT_PATH" --create --apply
+```
+
+`clean-workspace`, `migrate-data`, `archive-runs`, and `repair-mcp-paths` are preview-first unless `--apply` is passed. They manage only agent-generated artifacts under `.agent-workspace/claude-code-orchestrator` plus explicitly requested `CLAUDE.md` or `.mcp.json` updates.
 
 List profiles:
 
@@ -220,11 +240,13 @@ python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" diff --cwd "PROJECT_PATH"
 - After any write-enabled Claude Code run, inspect diffs and run verification before reporting success.
 - After any write-enabled run, call `check-write-scope` or `verify-run`. If `write_scope.status=blocked`, do not accept the run; inspect the rollback recommendation.
 - If the user wants to watch Claude Code work, use `run-visible`.
-- Windows Chinese output is handled with UTF-8 stdio and child-process UTF-8 env. If a host still renders text strangely, rely on the UTF-8 files under `runs/<run_id>/`.
+- Windows Chinese output is handled with UTF-8 stdio and child-process UTF-8 env. If a host still renders text strangely, rely on the UTF-8 files under `.agent-workspace/claude-code-orchestrator/runs/<run_id>/`.
 - Timeout output is preserved when the subprocess exposes partial stdout/stderr; use `last-run` to recover the tails.
 - For live control, prefer `run-streaming`: it uses Claude Code `stream-json`, writes `events.ndjson`, and enables `poll-run`, `run-status`, and `stop-run`.
 - For controller polling, prefer `poll-run --mode controller`. Raw `events.ndjson` stays on disk; Codex should usually read compact controller artifacts first.
 - When Claude Code needs a stable persona, project rules, or role-specific worker behavior, write `CLAUDE.md` first with `write-claude-md` or MCP tool `cc_write_claude_md`, then run the sub-agent from that project cwd.
+- Before heavy multi-agent work in a project, run `init-workspace` or MCP `cc_init_workspace`. Keep agent logs, reports, dashboards, archives, rollback notes, templates, policies, and temp files under `.agent-workspace/claude-code-orchestrator`.
+- Use `folder-policy` or MCP `cc_folder_policy` to make the boundary explicit: manage agent-generated artifacts only; do not clean, archive, or migrate project source files.
 
 ## Four-Phase Workflow
 
@@ -277,6 +299,13 @@ Use the same role names through MCP:
 - `cc_queue_submit`, `cc_queue_tick`, `cc_queue_status`, and `cc_queue_cancel` provide priority queue scheduling with `queued`, `running`, `done`, `failed`, `timed_out`, and `cancelled` states.
 - `cc_upgrade_check` records version state while preserving local calibration/cost files.
 - `cc_mock_stream_test` uses a fake Claude stream to validate `events.ndjson`, polling, status, and stop without spending model quota.
+- `cc_init_workspace` initializes `.agent-workspace`, run/report/dashboard/archive/rollback/log/tmp/template/policy dirs, and optionally `CLAUDE.md`.
+- `cc_workspace_status` shows the exact paths where Codex and Claude Code artifacts will be written.
+- `cc_migrate_data` previews or moves legacy `runs`, `reports`, and `dashboard` into the managed workspace.
+- `cc_clean_workspace` cleans tmp files, empty dirs, and expired run folders; it is dry-run by default.
+- `cc_archive_runs` zips selected or old run folders into `archives/`.
+- `cc_repair_mcp_paths` repairs `.mcp.json` so MCP uses the managed workspace paths.
+- `cc_folder_policy` returns or writes the policy that limits folder management to agent-generated artifacts.
 - `cc_dashboard` generates a local HTML worker dashboard.
 - `cc_open_run_folder` opens or returns a run log directory.
 - `cc_export_report` writes a Markdown report for a run or team.

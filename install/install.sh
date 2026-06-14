@@ -20,6 +20,7 @@ rsync -a \
   --exclude 'runs' \
   --exclude 'reports' \
   --exclude 'dashboard' \
+  --exclude '.agent-workspace' \
   --exclude 'node_modules' \
   --exclude '__pycache__' \
   --exclude '*.pyc' \
@@ -61,6 +62,8 @@ Run:
   export CC_ORCHESTRATOR_HOME="$TOOL_HOME"
   python "\$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" selftest
   python "\$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" healthcheck
+  python "\$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" init-workspace --cwd .
+  python "\$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" workspace-status --cwd .
   python "\$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" upgrade-check --apply
 
 For MCP auto-registration on Windows, run install/install-mcp.ps1.

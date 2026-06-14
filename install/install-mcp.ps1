@@ -65,6 +65,8 @@ args = [
 CC_ORCHESTRATOR_HOME = "$escapedRoot"
 PYTHONIOENCODING = "utf-8"
 PYTHONUTF8 = "1"
+CC_ORCHESTRATOR_WORKSPACE_ROOT = "."
+CC_ORCHESTRATOR_ARTIFACT_ROOT = ".agent-workspace/claude-code-orchestrator"
 $end
 "@
     $dir = Split-Path -Parent $Path
@@ -109,6 +111,8 @@ function Write-ClaudeConfig {
             CC_ORCHESTRATOR_HOME = $Root
             PYTHONIOENCODING = "utf-8"
             PYTHONUTF8 = "1"
+            CC_ORCHESTRATOR_WORKSPACE_ROOT = "."
+            CC_ORCHESTRATOR_ARTIFACT_ROOT = ".agent-workspace/claude-code-orchestrator"
         }
     }
     if ($WhatIfOnly) {

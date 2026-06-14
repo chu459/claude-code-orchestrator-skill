@@ -24,7 +24,7 @@
   <a href="README.md"><img alt="Language: English" src="https://img.shields.io/badge/README-English-black"></a>
   <a href="README.md"><img alt="Default README: English" src="https://img.shields.io/badge/Default-English-blue"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-brightgreen"></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-v0.4.1-black">
+  <img alt="Version" src="https://img.shields.io/badge/version-v0.5.0-black">
   <img alt="Codex Skill" src="https://img.shields.io/badge/Codex-Skill-0A0A0A">
   <img alt="MCP Included" src="https://img.shields.io/badge/MCP-Included-blue">
   <img alt="CCSwitch" src="https://img.shields.io/badge/CCSwitch-Model_Router-purple">
@@ -35,18 +35,35 @@
 <h2 align="center">更新日志</h2>
 
 <p align="center">
-  <b>当前版本：v0.4.1</b>
+  <b>当前版本：v0.5.0</b>
 </p>
 
 | 版本 | 更新内容 | 为什么重要 |
 | --- | --- | --- |
+| `v0.5.0` | 新增工作区治理：`.agent-workspace` 产物路由、`init-workspace`、`workspace-status`、`migrate-data`、`clean-workspace`、`archive-runs`、`repair-mcp-paths`、`folder-policy`，并补齐对应 MCP 工具。 | Codex 现在能把 Claude Code worker 的日志、报告、看板、临时文件、回滚记录、模板和策略文件关进统一目录，不乱碰项目源码。 |
 | `v0.4.1` | 新增滚动 `checkpoint-###.md` 总结、工具调用去重摘要、默认写入总控摘要文件的 controller poll，以及明确的 `queued/running/done/failed` 队列状态。 | Codex 平时只看决策级摘要，raw 日志继续留在磁盘审计，既省额度又更好控场。 |
 | `v0.4.0` | 新增 Codex 总控手册、Prompt Pack、压缩版总控轮询、`cc_summarize_run`、`cc_compact_events`、一键验收评分、真正的队列策略、模型能力库、本机偏好保留、worker 质量历史、失败模式识别、时间线看板。 | Codex 不再只是等 worker 回来，而是能边看边管、发现跑偏就停、改完自动验收、持续学习哪个模型最适合哪类任务。 |
 | `v0.3.0` | 新增 `cc_verify_run`、写入范围硬检查、mock streaming 端到端测试、任务队列、每日用量统计、升级迁移、MCP 自动注册、benchmark suite。 | 从“能跑 worker”，升级成“能验收、能回滚建议、能迁移、能低成本测试”的控制台。 |
-| `v0.2.x` | 新增实时控制：`run-streaming`、`poll-run`、`stop-run`、`run-status`、角色团队、交叉审查、看板、报告、成本护栏。 | Codex 可以边看边管 Claude Code worker，不用盲等结果。 |
-| `v0.1.x` | 完成 Skill + MCP + CLI 基座：CCSwitch 发现、模型评分、角色路由、`CLAUDE.md` 生成、可视 Claude Code 窗口、日志和安全默认值。 | 证明核心思路：Codex 当大脑，Claude Code 当执行层，CCSwitch 当本地模型路由器。 |
+| `v0.2.0` | 新增实时控制：`run-streaming`、`poll-run`、`stop-run`、`run-status`、角色团队、交叉审查、看板、报告、成本护栏。 | Codex 可以边看边管 Claude Code worker，不用盲等结果。 |
+| `v0.1.0` | 完成 Skill + MCP + CLI 基座：CCSwitch 发现、模型评分、角色路由、`CLAUDE.md` 生成、可视 Claude Code 窗口、日志和安全默认值。 | 证明核心思路：Codex 当大脑，Claude Code 当执行层，CCSwitch 当本地模型路由器。 |
 
 <h3 align="center">详细版本说明</h3>
+
+<details open>
+<summary><b>v0.5.0 - 工作区治理</b></summary>
+
+- 新增默认产物目录：`.agent-workspace/claude-code-orchestrator`。
+- 新增 `init-workspace`，一键创建 runs、reports、dashboard、archives、rollback、logs、tmp、templates、policies。
+- 新增 `workspace-status`，直接查看 Codex 和 Claude Code 现在会把产物写到哪里。
+- 新增 `migrate-data`，把旧 `runs`、`reports`、`dashboard` 安全迁移进统一目录。
+- 新增 `clean-workspace`，默认 dry-run，用来清理 tmp、空目录和过期 run。
+- 新增 `archive-runs`，把旧 run 打成 zip 放进 `archives/`。
+- 新增 `repair-mcp-paths`，自动修 `.mcp.json` 里的 `CC_ORCHESTRATOR_WORKSPACE_ROOT` 和 `CC_ORCHESTRATOR_ARTIFACT_ROOT`。
+- 新增 `folder-policy`，写清楚只管理 Agent 生成物，不乱碰项目源码。
+- 新增 MCP 工具：`cc_init_workspace`、`cc_workspace_status`、`cc_migrate_data`、`cc_clean_workspace`、`cc_archive_runs`、`cc_repair_mcp_paths`、`cc_folder_policy`。
+- 更新 worker prompt 和生成的 `CLAUDE.md`，让 Claude Code worker 把日志、报告、临时文件、回滚记录放进统一目录。
+
+</details>
 
 <details open>
 <summary><b>v0.4.1 - 总控 checkpoint、工具去重、队列状态补强</b></summary>
@@ -100,7 +117,7 @@
 </details>
 
 <details>
-<summary><b>v0.2.x - 实时 worker 控制</b></summary>
+<summary><b>v0.2.0 - 实时 worker 控制</b></summary>
 
 - 新增 `run-streaming` / `cc_run_streaming_agent`。
 - Claude Code 通过 `--output-format stream-json --include-partial-messages` 启动。
@@ -117,7 +134,7 @@
 </details>
 
 <details>
-<summary><b>v0.1.x - Skill、MCP、CLI、CCSwitch 基座</b></summary>
+<summary><b>v0.1.0 - Skill、MCP、CLI、CCSwitch 基座</b></summary>
 
 - 创建 Codex Skill 入口。
 - 内置 MCP Server。
@@ -194,7 +211,8 @@ Skill = Codex 的操作说明书
 - 给不同 Agent 角色选择最合适的模型。
 - 用 Claude Code 启动外部子 Agent。
 - 默认只读，避免乱改文件。
-- 保存每个 Agent 的运行记录。
+- 把每个 Agent 的运行记录保存到 `.agent-workspace/claude-code-orchestrator`。
+- 支持初始化、查看、清理、迁移、归档和约束 Agent 产物目录。
 - 支持 MCP 工具调用。
 - 支持可视 Claude Code 窗口。
 - 支持中文、Windows、UTF-8 输出。
@@ -237,13 +255,13 @@ Claude Code 能走 CCSwitch 的 provider
 把这句话丢给 Codex：
 
 ```text
-请从 https://github.com/chu459/claude-code-orchestrator-skill 安装这个 Codex Skill 和自带 MCP。把 Skill 放到 ~/.codex/skills/claude-code-orchestrator，把自带 MCP 写进 Codex config.toml，然后运行 selftest、healthcheck、score-models，并把多 agent 路由策略展示给我。不要打印任何密钥。
+请从 https://github.com/chu459/claude-code-orchestrator-skill 安装这个 Codex Skill 和自带 MCP。把 Skill 放到 ~/.codex/skills/claude-code-orchestrator，把自带 MCP 写进 Codex config.toml，然后运行 selftest、healthcheck、score-models、init-workspace、workspace-status，并把多 agent 路由策略展示给我。不要打印任何密钥。
 ```
 
 English version:
 
 ```text
-Install the Codex Skill and MCP server from https://github.com/chu459/claude-code-orchestrator-skill. Put the Skill at ~/.codex/skills/claude-code-orchestrator, wire the bundled MCP server into Codex config.toml, run selftest, healthcheck, score-models, and show me the selected multi-agent routing plan. Do not print secrets.
+Install the Codex Skill and MCP server from https://github.com/chu459/claude-code-orchestrator-skill. Put the Skill at ~/.codex/skills/claude-code-orchestrator, wire the bundled MCP server into Codex config.toml, run selftest, healthcheck, score-models, init-workspace, workspace-status, and show me the selected multi-agent routing plan. Do not print secrets.
 ```
 
 <h2 align="center">一行命令安装</h2>
@@ -308,6 +326,8 @@ args = [
 [mcp_servers.claude-code-orchestrator.env]
 PYTHONIOENCODING = "utf-8"
 PYTHONUTF8 = "1"
+CC_ORCHESTRATOR_WORKSPACE_ROOT = "."
+CC_ORCHESTRATOR_ARTIFACT_ROOT = ".agent-workspace/claude-code-orchestrator"
 ```
 
 也可以直接用安全安装脚本写入 Codex / Claude MCP 配置。脚本会先备份旧配置：
@@ -329,6 +349,8 @@ $env:CC_ORCHESTRATOR_HOME = "$env:USERPROFILE\.codex\skills\claude-code-orchestr
 python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" selftest
 python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" healthcheck
 python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" score-models
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" init-workspace --cwd .
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" workspace-status --cwd .
 python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" workflow-plan "Refactor this project safely"
 ```
 
@@ -338,6 +360,8 @@ python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" workflow-plan "Refactor th
 - `healthcheck.ok = true`
 - 能发现 CCSwitch profile
 - 能列出 CCSwitch 里的模型
+- 能初始化 `.agent-workspace/claude-code-orchestrator`
+- 能看到 runs、reports、dashboard 会写到哪里
 - 能生成多 Agent 路由计划
 
 <h2 align="center">常用命令</h2>
@@ -418,6 +442,13 @@ python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" benchmark-suite --profile PROF
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" calibrate-policy --preference coding=glm-5 --preference multimodal=qwen3.7-plus
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" cost-guard --max-concurrent 4 --max-timeout-seconds 1200 --apply
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" usage-summary --write-report
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" init-workspace
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" workspace-status
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" migrate-data
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" clean-workspace
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" archive-runs --older-than-days 30
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" repair-mcp-paths --create
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" folder-policy --apply
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" queue-submit "Review this repo" --role review --priority 100
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" queue-tick --max-concurrent 3
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" queue-policy --max-concurrent 3 --default-timeout-seconds 900 --apply
@@ -488,6 +519,13 @@ Codex 可以调用这些工具：
 | `cc_queue_policy` | 读写队列并发、重试和超时策略 |
 | `cc_upgrade_check` | 升级时保留本机模型偏好、模型库、质量历史、队列策略和成本配置 |
 | `cc_mock_stream_test` | 用 fake Claude 流测试 streaming、poll、stop、status |
+| `cc_init_workspace` | 初始化 `.agent-workspace`、模板、策略文件、回滚/日志目录和可选 `CLAUDE.md` |
+| `cc_workspace_status` | 查看 Codex 和 Claude Code 产物会写到哪里 |
+| `cc_migrate_data` | dry-run 或迁移旧 `runs`、`reports`、`dashboard` 到统一目录 |
+| `cc_clean_workspace` | 清理 tmp、空目录和过期 run，默认 dry-run |
+| `cc_archive_runs` | 把旧 run 打包到 `archives/` |
+| `cc_repair_mcp_paths` | 修 `.mcp.json`，让 MCP 写入统一目录 |
+| `cc_folder_policy` | 返回或写入“只管理 Agent 产物”的目录规则 |
 | `cc_dashboard` | 生成本地 HTML worker 面板 |
 | `cc_open_run_folder` | 打开或返回某次 run 日志目录 |
 | `cc_export_report` | 导出 run 或 team 的 Markdown 报告 |
@@ -610,7 +648,7 @@ flowchart TD
   Router --> ClaudeMD["Project CLAUDE.md"]
   ClaudeMD --> ClaudeCode["Claude Code Worker Process"]
   Router --> ClaudeCode
-  ClaudeCode --> Runs["runs/<run_id> logs"]
+  ClaudeCode --> Runs[".agent-workspace/claude-code-orchestrator/runs/<run_id> logs"]
   Runs --> Codex
 ```
 
@@ -627,6 +665,7 @@ flowchart TD
 - Windows 中文输出强制 UTF-8。
 - 超时后尽量保留部分 stdout/stderr。
 - 已有 `CLAUDE.md` 默认不覆盖，除非显式使用 `--append` 或 `--force`。
+- 工作区治理只管理 `.agent-workspace/claude-code-orchestrator` 里的 Agent 产物，不清理项目源码。
 
 <h2 align="center">实时进度怎么看</h2>
 
@@ -641,15 +680,15 @@ flowchart TD
 Windows：
 
 ```powershell
-Get-Content "$env:CC_ORCHESTRATOR_HOME\runs\<run_id>\stdout.txt" -Wait
-Get-Content "$env:CC_ORCHESTRATOR_HOME\runs\<run_id>\events.ndjson" -Wait
+Get-Content ".agent-workspace\claude-code-orchestrator\runs\<run_id>\stdout.txt" -Wait
+Get-Content ".agent-workspace\claude-code-orchestrator\runs\<run_id>\events.ndjson" -Wait
 ```
 
 macOS / Linux：
 
 ```bash
-tail -f "$CC_ORCHESTRATOR_HOME/runs/<run_id>/stdout.txt"
-tail -f "$CC_ORCHESTRATOR_HOME/runs/<run_id>/events.ndjson"
+tail -f ".agent-workspace/claude-code-orchestrator/runs/<run_id>/stdout.txt"
+tail -f ".agent-workspace/claude-code-orchestrator/runs/<run_id>/events.ndjson"
 ```
 
 P0 实时掌控四件套已经可用：
@@ -729,6 +768,9 @@ docs/realtime-progress.md
 - [x] Worker quality scoring
 - [x] Failure-mode detection
 - [x] Queue policy with priority, retry, timeout, and max concurrency
+- [x] `.agent-workspace` 产物路由
+- [x] 工作区初始化、状态、迁移、清理和归档工具
+- [x] MCP 路径修复和目录策略
 - [x] Daily update monitor automation
 - [x] Web-style local dashboard
 - [ ] Agent result voting

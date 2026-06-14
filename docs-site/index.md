@@ -23,6 +23,8 @@ features:
     details: Launch external Claude Code runs through CLI or MCP, with logs saved for review.
   - title: CCSwitch as router
     details: Read configured profiles, score available models, and pick the best fit per role.
+  - title: Workspace governance
+    details: Keep runs, reports, dashboards, archives, rollback notes, templates, and policies under .agent-workspace.
   - title: Safe by default
     details: Plan mode, redacted secrets, conservative write rules, and explicit run metadata.
 ---

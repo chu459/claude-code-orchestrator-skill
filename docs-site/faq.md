@@ -59,10 +59,22 @@ python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" last-run
 Under:
 
 ```text
-scripts/cc-orchestrator/runs/<run_id>/
+.agent-workspace/claude-code-orchestrator/runs/<run_id>/
 ```
 
 Each run can include `metadata.json`, `prompt.txt`, `stdout.txt`, and `stderr.txt`.
+
+## How do I keep agent files tidy?
+
+Start with:
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" init-workspace --cwd /path/to/project
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" workspace-status --cwd /path/to/project
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" clean-workspace --cwd /path/to/project
+```
+
+`clean-workspace` is dry-run by default. It only manages agent-generated artifacts under `.agent-workspace/claude-code-orchestrator`.
 
 ## Why does Windows output look strange sometimes?
 

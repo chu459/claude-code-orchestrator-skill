@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 import uuid
+import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,10 +56,33 @@ configure_stdio()
 ROOT = Path(__file__).resolve().parent
 SKILL_ROOT = ROOT.parent.parent
 CONFIG_DIR = ROOT / "config"
-RUNS_DIR = ROOT / "runs"
+AGENT_WORKSPACE_DIRNAME = ".agent-workspace"
+ARTIFACT_NAMESPACE = "claude-code-orchestrator"
+
+
+def resolve_workspace_root(cwd: str | Path | None = None) -> Path:
+    explicit = os.environ.get("CC_ORCHESTRATOR_WORKSPACE_ROOT") or os.environ.get("CC_ORCHESTRATOR_WORKSPACE")
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    return Path(cwd or os.getcwd()).expanduser().resolve()
+
+
+def resolve_artifact_root(cwd: str | Path | None = None) -> Path:
+    explicit = os.environ.get("CC_ORCHESTRATOR_ARTIFACT_ROOT")
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    return resolve_workspace_root(cwd) / AGENT_WORKSPACE_DIRNAME / ARTIFACT_NAMESPACE
+
+
+WORKSPACE_ROOT = resolve_workspace_root()
+ARTIFACT_ROOT = resolve_artifact_root(WORKSPACE_ROOT)
+RUNS_DIR = ARTIFACT_ROOT / "runs"
 TEAMS_DIR = RUNS_DIR / "teams"
-REPORTS_DIR = ROOT / "reports"
-DASHBOARD_DIR = ROOT / "dashboard"
+REPORTS_DIR = ARTIFACT_ROOT / "reports"
+DASHBOARD_DIR = ARTIFACT_ROOT / "dashboard"
+LEGACY_RUNS_DIR = ROOT / "runs"
+LEGACY_REPORTS_DIR = ROOT / "reports"
+LEGACY_DASHBOARD_DIR = ROOT / "dashboard"
 REFERENCES_DIR = SKILL_ROOT / "references"
 PROMPT_PACK_DIR = REFERENCES_DIR / "prompt-pack"
 VERSION_PATH = SKILL_ROOT / "version.json"
@@ -114,6 +138,8 @@ PASSTHROUGH_ENV_KEYS = {
     "LOCALAPPDATA",
     "PROGRAMDATA",
     "CLAUDE_CODE_BIN",
+    "CC_ORCHESTRATOR_WORKSPACE_ROOT",
+    "CC_ORCHESTRATOR_ARTIFACT_ROOT",
     "CC_ORCHESTRATOR_FAKE_STEPS",
     "CC_ORCHESTRATOR_FAKE_DELAY",
     "LANG",
@@ -354,7 +380,480 @@ def build_worker_env(provider_env: dict[str, str], model_override: str | None = 
     if model_override:
         env["ANTHROPIC_MODEL"] = str(model_override)
     env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+    env["CC_ORCHESTRATOR_WORKSPACE_ROOT"] = str(WORKSPACE_ROOT)
+    env["CC_ORCHESTRATOR_ARTIFACT_ROOT"] = str(ARTIFACT_ROOT)
     return force_utf8_env(env)
+
+
+def workspace_paths(cwd: str | Path | None = None) -> dict[str, Path]:
+    workspace_root = WORKSPACE_ROOT if cwd is None else Path(cwd).expanduser().resolve()
+    artifact_root = ARTIFACT_ROOT if cwd is None else workspace_root / AGENT_WORKSPACE_DIRNAME / ARTIFACT_NAMESPACE
+    return {
+        "workspace_root": workspace_root,
+        "agent_workspace": artifact_root.parent,
+        "artifact_root": artifact_root,
+        "runs": artifact_root / "runs",
+        "teams": artifact_root / "runs" / "teams",
+        "reports": artifact_root / "reports",
+        "dashboard": artifact_root / "dashboard",
+        "archives": artifact_root / "archives",
+        "rollback": artifact_root / "rollback",
+        "logs": artifact_root / "logs",
+        "tmp": artifact_root / "tmp",
+        "templates": artifact_root / "templates",
+        "policies": artifact_root / "policies",
+    }
+
+
+def path_info(path: Path) -> dict[str, Any]:
+    try:
+        exists = path.exists()
+        size = path_size(path) if exists else 0
+        return {"path": str(path), "exists": exists, "bytes": size}
+    except Exception as exc:
+        return {"path": str(path), "exists": False, "error": str(exc)}
+
+
+def path_size(path: Path) -> int:
+    if not path.exists():
+        return 0
+    if path.is_file():
+        return path.stat().st_size
+    total = 0
+    for item in path.rglob("*"):
+        try:
+            if item.is_file():
+                total += item.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def ensure_under(root: Path, path: Path) -> Path:
+    resolved_root = root.resolve()
+    resolved_path = path.resolve()
+    try:
+        resolved_path.relative_to(resolved_root)
+    except ValueError as exc:
+        raise OrchestratorError(f"Refusing path outside managed workspace: {resolved_path}") from exc
+    return resolved_path
+
+
+def managed_dirs(paths: dict[str, Path]) -> list[Path]:
+    return [paths[name] for name in ("runs", "teams", "reports", "dashboard", "archives", "rollback", "logs", "tmp", "templates", "policies")]
+
+
+def default_folder_policy(cwd: str | Path | None = None) -> dict[str, Any]:
+    paths = workspace_paths(cwd)
+    artifact_root = paths["artifact_root"]
+    return {
+        "schema_version": 1,
+        "generated_at": utc_now_iso(),
+        "workspace_root": str(paths["workspace_root"]),
+        "artifact_root": str(artifact_root),
+        "principle": "Only manage agent-generated artifacts. Do not move, delete, or rewrite project source files.",
+        "allowed_agent_artifact_dirs": [str(path) for path in managed_dirs(paths)],
+        "allowed_project_files_when_explicitly_requested": [
+            str(paths["workspace_root"] / "CLAUDE.md"),
+            str(paths["workspace_root"] / ".mcp.json"),
+            str(paths["workspace_root"] / ".gitignore"),
+        ],
+        "forbidden_project_paths": [
+            ".git/",
+            ".env",
+            ".env.*",
+            "src/",
+            "app/",
+            "lib/",
+            "packages/",
+            "docs/",
+            "README.md",
+        ],
+        "commands": {
+            "init_workspace": "May create .agent-workspace, templates, policy files, and an optional managed CLAUDE.md section.",
+            "migrate_data": "May move legacy runs/reports/dashboard into artifact_root only when apply=true.",
+            "clean_workspace": "Dry-run by default. May delete only tmp files, empty dirs, or expired run folders under artifact_root.",
+            "archive_runs": "Archives run folders under artifact_root/archives. Removal requires apply=true and remove=true.",
+            "repair_mcp_paths": "May update only .mcp.json MCP env path keys when apply=true.",
+        },
+    }
+
+
+def folder_policy(cwd: str | Path | None = None, apply: bool = False) -> dict[str, Any]:
+    paths = workspace_paths(cwd)
+    policy = default_folder_policy(cwd)
+    policy_path = paths["policies"] / "folder-policy.json"
+    if apply:
+        policy_path.parent.mkdir(parents=True, exist_ok=True)
+        policy_path.write_text(json.dumps(policy, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"ok": True, "applied": apply, "path": str(policy_path), "policy": policy}
+
+
+def write_workspace_templates(paths: dict[str, Path]) -> list[str]:
+    templates_dir = paths["templates"]
+    templates_dir.mkdir(parents=True, exist_ok=True)
+    templates = {
+        "worker-task.md": "\n".join(
+            [
+                "# Worker Task",
+                "",
+                "- Goal:",
+                "- Role:",
+                "- Allowed write scope:",
+                "- Stop signals:",
+                "- Required evidence:",
+                "",
+            ]
+        ),
+        "run-report.md": "\n".join(
+            [
+                "# Run Report",
+                "",
+                "- Run id:",
+                "- Model/profile:",
+                "- Files touched:",
+                "- Checks run:",
+                "- Risks:",
+                "- Controller decision:",
+                "",
+            ]
+        ),
+        "rollback-note.md": "\n".join(
+            [
+                "# Rollback Note",
+                "",
+                "- Run id:",
+                "- Snapshot:",
+                "- Files restored:",
+                "- Reason:",
+                "",
+            ]
+        ),
+    }
+    written: list[str] = []
+    for name, content in templates.items():
+        path = templates_dir / name
+        if not path.exists():
+            path.write_text(content, encoding="utf-8")
+            written.append(str(path))
+    return written
+
+
+def init_workspace(
+    cwd: str | Path | None = None,
+    role: str = "development",
+    write_claude: bool = True,
+    repair_mcp: bool = False,
+) -> dict[str, Any]:
+    paths = workspace_paths(cwd)
+    for path in managed_dirs(paths):
+        path.mkdir(parents=True, exist_ok=True)
+    workspace_readme = paths["artifact_root"] / "README.md"
+    if not workspace_readme.exists():
+        workspace_readme.write_text(
+            "\n".join(
+                [
+                    "# Claude Code Orchestrator Workspace",
+                    "",
+                    "This directory stores agent-generated artifacts only.",
+                    "",
+                    "- runs/: Claude Code run logs and events",
+                    "- reports/: exported reports and verification output",
+                    "- dashboard/: local HTML dashboard",
+                    "- archives/: zipped old runs",
+                    "- rollback/: rollback notes and snapshots",
+                    "- tmp/: temporary files",
+                    "- templates/: reusable task/report templates",
+                    "- policies/: folder policy and governance files",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+    local_gitignore = paths["agent_workspace"] / ".gitignore"
+    if not local_gitignore.exists():
+        local_gitignore.write_text("*\n!.gitignore\n", encoding="utf-8")
+    templates = write_workspace_templates(paths)
+    policy_result = folder_policy(cwd, apply=True)
+    claude_result: dict[str, Any] | None = None
+    if write_claude:
+        claude_result = write_claude_md(cwd=paths["workspace_root"], role=role, append=True)
+    repair_result: dict[str, Any] | None = None
+    if repair_mcp:
+        repair_result = repair_mcp_paths(cwd=paths["workspace_root"], apply=True, create=True)
+    return {
+        "ok": True,
+        "workspace_root": str(paths["workspace_root"]),
+        "artifact_root": str(paths["artifact_root"]),
+        "created_dirs": [str(path) for path in managed_dirs(paths)],
+        "templates_written": templates,
+        "folder_policy": policy_result,
+        "claude_md": claude_result,
+        "mcp_repair": repair_result,
+    }
+
+
+def workspace_status(cwd: str | Path | None = None) -> dict[str, Any]:
+    paths = workspace_paths(cwd)
+    mcp_path = paths["workspace_root"] / ".mcp.json"
+    policy_path = paths["policies"] / "folder-policy.json"
+    policy_data = read_json_file(policy_path, {}) if policy_path.exists() else {}
+    return {
+        "ok": True,
+        "workspace_root": str(paths["workspace_root"]),
+        "artifact_root": str(paths["artifact_root"]),
+        "env": {
+            "CC_ORCHESTRATOR_WORKSPACE_ROOT": os.environ.get("CC_ORCHESTRATOR_WORKSPACE_ROOT"),
+            "CC_ORCHESTRATOR_ARTIFACT_ROOT": os.environ.get("CC_ORCHESTRATOR_ARTIFACT_ROOT"),
+        },
+        "current_runtime_dirs": {
+            "runs": str(RUNS_DIR),
+            "reports": str(REPORTS_DIR),
+            "dashboard": str(DASHBOARD_DIR),
+        },
+        "managed_dirs": {name: path_info(path) for name, path in paths.items() if name not in {"workspace_root", "agent_workspace", "artifact_root"}},
+        "legacy_dirs": {
+            "runs": path_info(LEGACY_RUNS_DIR),
+            "reports": path_info(LEGACY_REPORTS_DIR),
+            "dashboard": path_info(LEGACY_DASHBOARD_DIR),
+        },
+        "claude_md": path_info(paths["workspace_root"] / "CLAUDE.md"),
+        "mcp_json": path_info(mcp_path),
+        "folder_policy": {"path": str(policy_path), "exists": policy_path.exists(), "policy": policy_data},
+    }
+
+
+def unique_destination(path: Path) -> Path:
+    if not path.exists():
+        return path
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    candidate = path.with_name(f"{path.name}.migrated-{stamp}")
+    counter = 1
+    while candidate.exists():
+        candidate = path.with_name(f"{path.name}.migrated-{stamp}-{counter}")
+        counter += 1
+    return candidate
+
+
+def plan_move_contents(source: Path, destination: Path) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    if not source.exists():
+        return actions
+    for item in sorted(source.iterdir(), key=lambda p: p.name):
+        target = unique_destination(destination / item.name)
+        actions.append({"source": str(item), "destination": str(target), "bytes": path_size(item)})
+    return actions
+
+
+def migrate_data(cwd: str | Path | None = None, apply: bool = False) -> dict[str, Any]:
+    paths = workspace_paths(cwd)
+    mapping = [
+        ("runs", LEGACY_RUNS_DIR, paths["runs"]),
+        ("reports", LEGACY_REPORTS_DIR, paths["reports"]),
+        ("dashboard", LEGACY_DASHBOARD_DIR, paths["dashboard"]),
+    ]
+    actions: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    artifact_root = paths["artifact_root"]
+    if apply:
+        artifact_root.mkdir(parents=True, exist_ok=True)
+    for kind, source, destination in mapping:
+        if source.resolve() == destination.resolve():
+            skipped.append({"kind": kind, "source": str(source), "reason": "source_is_destination"})
+            continue
+        for action in plan_move_contents(source, destination):
+            action["kind"] = kind
+            if kind == "runs":
+                source_path = Path(action["source"])
+                if source_path.is_dir() and RUN_ID_RE.match(source_path.name) and run_dir_active(source_path):
+                    skipped.append({"kind": kind, "source": str(source_path), "reason": "active_run"})
+                    continue
+            actions.append(action)
+            if apply:
+                destination.mkdir(parents=True, exist_ok=True)
+                src = ensure_under(ROOT, Path(action["source"]))
+                dst = ensure_under(artifact_root, Path(action["destination"]))
+                shutil.move(str(src), str(dst))
+    return {
+        "ok": True,
+        "applied": apply,
+        "artifact_root": str(artifact_root),
+        "action_count": len(actions),
+        "actions": actions,
+        "skipped": skipped,
+    }
+
+
+def run_dir_active(run_dir: Path) -> bool:
+    try:
+        metadata = read_json_file(run_dir / "metadata.json", {})
+        return pid_alive(int(metadata.get("child_pid") or 0)) or pid_alive(int(metadata.get("worker_pid") or 0))
+    except Exception:
+        return False
+
+
+def older_than(path: Path, days: int) -> bool:
+    if days <= 0:
+        return True
+    try:
+        return (time.time() - path.stat().st_mtime) >= days * 86400
+    except OSError:
+        return False
+
+
+def clean_workspace(cwd: str | Path | None = None, older_than_days: int = 30, dry_run: bool = True) -> dict[str, Any]:
+    paths = workspace_paths(cwd)
+    artifact_root = paths["artifact_root"]
+    actions: list[dict[str, Any]] = []
+    if not artifact_root.exists():
+        return {"ok": True, "dry_run": dry_run, "artifact_root": str(artifact_root), "action_count": 0, "actions": []}
+    for item in paths["tmp"].glob("*") if paths["tmp"].exists() else []:
+        actions.append({"action": "delete_tmp", "path": str(item), "bytes": path_size(item)})
+    if paths["runs"].exists():
+        for run_dir in sorted(paths["runs"].iterdir(), key=lambda p: p.stat().st_mtime if p.exists() else 0):
+            if not run_dir.is_dir() or not RUN_ID_RE.match(run_dir.name):
+                continue
+            if run_dir_active(run_dir):
+                continue
+            if older_than(run_dir, older_than_days):
+                actions.append({"action": "delete_expired_run", "path": str(run_dir), "bytes": path_size(run_dir)})
+    for item in sorted(artifact_root.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+        if item.is_dir():
+            try:
+                if not any(item.iterdir()):
+                    actions.append({"action": "delete_empty_dir", "path": str(item), "bytes": 0})
+            except OSError:
+                continue
+    if not dry_run:
+        for action in actions:
+            target = ensure_under(artifact_root, Path(action["path"]))
+            if target.is_dir():
+                shutil.rmtree(target, ignore_errors=True)
+            elif target.exists():
+                target.unlink()
+    return {
+        "ok": True,
+        "dry_run": dry_run,
+        "artifact_root": str(artifact_root),
+        "older_than_days": older_than_days,
+        "action_count": len(actions),
+        "bytes": sum(int(action.get("bytes") or 0) for action in actions),
+        "actions": actions,
+    }
+
+
+def archive_runs(
+    cwd: str | Path | None = None,
+    older_than_days: int = 30,
+    run_ids: list[str] | None = None,
+    apply: bool = False,
+    remove: bool = False,
+) -> dict[str, Any]:
+    paths = workspace_paths(cwd)
+    runs_dir = paths["runs"]
+    archives_dir = paths["archives"]
+    selected: list[Path] = []
+    requested = set(run_ids or [])
+    if runs_dir.exists():
+        for run_dir in runs_dir.iterdir():
+            if not run_dir.is_dir() or not RUN_ID_RE.match(run_dir.name):
+                continue
+            if requested and run_dir.name not in requested:
+                continue
+            if run_dir_active(run_dir):
+                continue
+            if requested or older_than(run_dir, older_than_days):
+                selected.append(run_dir)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    archive_path = archives_dir / f"runs-{stamp}.zip"
+    if apply and selected:
+        archives_dir.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for run_dir in selected:
+                for item in run_dir.rglob("*"):
+                    if item.is_file():
+                        archive.write(item, arcname=str(Path("runs") / run_dir.name / item.relative_to(run_dir)))
+        if remove:
+            for run_dir in selected:
+                shutil.rmtree(ensure_under(runs_dir, run_dir), ignore_errors=True)
+    return {
+        "ok": True,
+        "applied": apply,
+        "remove_after_archive": remove,
+        "archive_path": str(archive_path),
+        "selected_count": len(selected),
+        "selected_runs": [path.name for path in selected],
+    }
+
+
+def default_mcp_server_block(paths: dict[str, Path]) -> dict[str, Any]:
+    return {
+        "command": "python",
+        "args": [
+            "-c",
+            "import os,sys,runpy; root=os.environ.get('CC_ORCHESTRATOR_HOME') or os.path.join(os.getcwd(), 'scripts', 'cc-orchestrator'); sys.path.insert(0, root); runpy.run_path(os.path.join(root, 'server.py'), run_name='__main__')",
+        ],
+        "env": {
+            "PYTHONUTF8": "1",
+            "PYTHONIOENCODING": "utf-8",
+            "CC_ORCHESTRATOR_WORKSPACE_ROOT": str(paths["workspace_root"]),
+            "CC_ORCHESTRATOR_ARTIFACT_ROOT": str(paths["artifact_root"]),
+        },
+    }
+
+
+def repair_mcp_paths(
+    cwd: str | Path | None = None,
+    mcp_path: str | Path | None = None,
+    apply: bool = False,
+    create: bool = False,
+) -> dict[str, Any]:
+    paths = workspace_paths(cwd)
+    if mcp_path:
+        raw_path = Path(mcp_path).expanduser()
+        path = raw_path.resolve() if raw_path.is_absolute() else (paths["workspace_root"] / raw_path).resolve()
+    else:
+        path = paths["workspace_root"] / ".mcp.json"
+    before: dict[str, Any] | None = None
+    if path.exists():
+        before = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(json.dumps(before))
+    elif create:
+        data = {}
+    else:
+        return {"ok": True, "applied": False, "path": str(path), "changed": False, "reason": ".mcp.json not found; pass create=true to create it."}
+    if "mcpServers" in data:
+        servers = data.setdefault("mcpServers", {})
+    else:
+        servers = data
+    block = servers.get("claude-code-orchestrator")
+    if not isinstance(block, dict):
+        block = default_mcp_server_block(paths)
+        servers["claude-code-orchestrator"] = block
+    env = block.setdefault("env", {})
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["CC_ORCHESTRATOR_WORKSPACE_ROOT"] = str(paths["workspace_root"])
+    env["CC_ORCHESTRATOR_ARTIFACT_ROOT"] = str(paths["artifact_root"])
+    after = data
+    changed = before != after
+    backup_path: Path | None = None
+    if apply and changed:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            backup_path = path.with_name(f"{path.name}.backup.{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}")
+            backup_path.write_text(path.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+        path.write_text(json.dumps(after, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return {
+        "ok": True,
+        "applied": apply and changed,
+        "path": str(path),
+        "changed": changed,
+        "backup_path": str(backup_path) if backup_path else None,
+        "workspace_root": str(paths["workspace_root"]),
+        "artifact_root": str(paths["artifact_root"]),
+        "mcp": after,
+    }
 
 
 def safe_run_dir(run_id: str) -> Path:
@@ -1632,6 +2131,7 @@ def build_prompt(role: str, task: str, context: str | None = None) -> str:
         "- Do not reveal API keys, tokens, secrets, or hidden configuration values.",
         "- Do not revert unrelated work.",
         "- If you edit files, list every changed file and why.",
+        f"- Put agent logs, reports, temporary files, and rollback notes only under: {ARTIFACT_ROOT}",
         "",
         "Task:",
         task.strip(),
@@ -3799,7 +4299,7 @@ def write_auto_policy(path: Path = POLICY_PATH) -> dict[str, Any]:
 
 
 def write_reports(output_dir: Path | None = None) -> dict[str, Any]:
-    report_dir = output_dir or (ROOT / "reports")
+    report_dir = output_dir or REPORTS_DIR
     report_dir.mkdir(parents=True, exist_ok=True)
     scores = score_models()
     plan = run_workflow_plan("local multi-agent routing calibration")
@@ -3876,6 +4376,8 @@ def build_claude_md(role: str = "implementation", project_name: str | None = Non
             "- Do not revert unrelated user changes.",
             "- Prefer read-only analysis unless write access is explicitly granted.",
             "- When editing, list changed files and verification results.",
+            f"- Store agent-generated logs, reports, temporary files, and rollback notes under `{ARTIFACT_ROOT}`.",
+            "- Do not scatter agent runtime artifacts into the project source tree.",
             "- If blocked, report the blocker, the evidence, and the smallest next action.",
             "",
             "## Progress Reporting",
@@ -3972,6 +4474,8 @@ def selftest() -> dict[str, Any]:
     worker_env = build_worker_env({"ANTHROPIC_API_KEY": sample_api_key})
     secret_findings = secret_scan_text("OPENAI_API_KEY=sk-" + ("1" * 32), "selftest")
     false_findings = secret_scan_text("input_tokens = estimate_tokens_from_text(prompt)", "selftest")
+    status = workspace_status()
+    policy = folder_policy(apply=False)
     checks = {
         "utf8_env": env.get("PYTHONIOENCODING") == "utf-8" and env.get("PYTHONUTF8") == "1",
         "timeout_bytes_decode": decoded == "中文✅",
@@ -3984,6 +4488,9 @@ def selftest() -> dict[str, Any]:
         "run_id_validation": run_id_rejected,
         "worker_env_allowlist": "ANTHROPIC_API_KEY" in worker_env and "GITHUB_TOKEN" not in worker_env and "NPM_TOKEN" not in worker_env,
         "mock_env_allowlist": "CC_ORCHESTRATOR_FAKE_STEPS" in PASSTHROUGH_ENV_KEYS,
+        "workspace_root_configured": AGENT_WORKSPACE_DIRNAME in str(status.get("artifact_root")),
+        "worker_env_artifact_root": worker_env.get("CC_ORCHESTRATOR_ARTIFACT_ROOT") == str(ARTIFACT_ROOT),
+        "folder_policy_generated_only": "Only manage agent-generated artifacts" in str(policy.get("policy", {}).get("principle", "")),
     }
     return {
         "ok": all(checks.values()),
@@ -4075,6 +4582,34 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Claude Code orchestrator backed by CCSwitch.")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("healthcheck")
+    init_ws = sub.add_parser("init-workspace")
+    init_ws.add_argument("--cwd")
+    init_ws.add_argument("--role", default="development")
+    init_ws.add_argument("--no-claude-md", action="store_true")
+    init_ws.add_argument("--repair-mcp", action="store_true")
+    ws_status = sub.add_parser("workspace-status")
+    ws_status.add_argument("--cwd")
+    migrate_cmd = sub.add_parser("migrate-data")
+    migrate_cmd.add_argument("--cwd")
+    migrate_cmd.add_argument("--apply", action="store_true")
+    clean_cmd = sub.add_parser("clean-workspace")
+    clean_cmd.add_argument("--cwd")
+    clean_cmd.add_argument("--older-than-days", type=int, default=30)
+    clean_cmd.add_argument("--apply", action="store_true")
+    archive_cmd = sub.add_parser("archive-runs")
+    archive_cmd.add_argument("--cwd")
+    archive_cmd.add_argument("--older-than-days", type=int, default=30)
+    archive_cmd.add_argument("--run-id", action="append", dest="run_ids")
+    archive_cmd.add_argument("--apply", action="store_true")
+    archive_cmd.add_argument("--remove", action="store_true")
+    repair_cmd = sub.add_parser("repair-mcp-paths")
+    repair_cmd.add_argument("--cwd")
+    repair_cmd.add_argument("--mcp-path")
+    repair_cmd.add_argument("--create", action="store_true")
+    repair_cmd.add_argument("--apply", action="store_true")
+    policy_cmd = sub.add_parser("folder-policy")
+    policy_cmd.add_argument("--cwd")
+    policy_cmd.add_argument("--apply", action="store_true")
     lp = sub.add_parser("list-profiles")
     lp.add_argument("--include-secrets", action="store_true")
     pick = sub.add_parser("pick")
@@ -4287,6 +4822,20 @@ def main() -> int:
     try:
         if args.command == "healthcheck":
             print_json(healthcheck())
+        elif args.command == "init-workspace":
+            print_json(init_workspace(cwd=args.cwd, role=args.role, write_claude=not args.no_claude_md, repair_mcp=args.repair_mcp))
+        elif args.command == "workspace-status":
+            print_json(workspace_status(cwd=args.cwd))
+        elif args.command == "migrate-data":
+            print_json(migrate_data(cwd=args.cwd, apply=args.apply))
+        elif args.command == "clean-workspace":
+            print_json(clean_workspace(cwd=args.cwd, older_than_days=args.older_than_days, dry_run=not args.apply))
+        elif args.command == "archive-runs":
+            print_json(archive_runs(cwd=args.cwd, older_than_days=args.older_than_days, run_ids=args.run_ids, apply=args.apply, remove=args.remove))
+        elif args.command == "repair-mcp-paths":
+            print_json(repair_mcp_paths(cwd=args.cwd, mcp_path=args.mcp_path, apply=args.apply, create=args.create))
+        elif args.command == "folder-policy":
+            print_json(folder_policy(cwd=args.cwd, apply=args.apply))
         elif args.command == "list-profiles":
             print_json(list_profiles(include_secrets=args.include_secrets))
         elif args.command == "pick":

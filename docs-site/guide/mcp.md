@@ -17,6 +17,8 @@ args = [
 [mcp_servers.claude-code-orchestrator.env]
 PYTHONIOENCODING = "utf-8"
 PYTHONUTF8 = "1"
+CC_ORCHESTRATOR_WORKSPACE_ROOT = "."
+CC_ORCHESTRATOR_ARTIFACT_ROOT = ".agent-workspace/claude-code-orchestrator"
 ```
 
 On Windows, the safe installer can write Codex and Claude MCP config after making backups:
@@ -71,6 +73,13 @@ docs/mcp.codex.example.toml
 | `cc_queue_policy` | Reads or writes queue concurrency, retry, and timeout policy |
 | `cc_upgrade_check` | Preserves local preferences across upgrades |
 | `cc_mock_stream_test` | Tests streaming without spending model quota |
+| `cc_init_workspace` | Initializes `.agent-workspace`, templates, policies, rollback/log dirs, and optional `CLAUDE.md` |
+| `cc_workspace_status` | Shows where Codex and Claude Code artifacts will be written |
+| `cc_migrate_data` | Previews or migrates old `runs`, `reports`, and `dashboard` |
+| `cc_clean_workspace` | Cleans tmp files, empty dirs, and expired runs, dry-run by default |
+| `cc_archive_runs` | Zips old run folders under `archives/` |
+| `cc_repair_mcp_paths` | Repairs `.mcp.json` workspace and artifact env values |
+| `cc_folder_policy` | Returns or writes the managed-artifacts-only folder policy |
 | `cc_dashboard` | Generates a local HTML dashboard |
 | `cc_open_run_folder` | Opens a run folder |
 | `cc_export_report` | Exports a run or team report |
@@ -98,6 +107,7 @@ After restarting Codex, call:
 cc_healthcheck
 cc_list_profiles
 cc_score_models
+cc_workspace_status
 ```
 
 If these work, Codex can route workers through MCP.

@@ -7,7 +7,7 @@ This page gets the Skill installed, checks the local setup, and points Codex at 
 Paste this into Codex after Claude Code and CCSwitch are installed:
 
 ```text
-Install the Codex Skill and MCP server from https://github.com/chu459/claude-code-orchestrator-skill. Put the Skill at ~/.codex/skills/claude-code-orchestrator, wire the bundled MCP server into Codex config.toml, run selftest, healthcheck, score-models, and show me the selected multi-agent routing plan. Do not print secrets.
+Install the Codex Skill and MCP server from https://github.com/chu459/claude-code-orchestrator-skill. Put the Skill at ~/.codex/skills/claude-code-orchestrator, wire the bundled MCP server into Codex config.toml, run selftest, healthcheck, score-models, init-workspace, workspace-status, and show me the selected multi-agent routing plan. Do not print secrets.
 ```
 
 ## Install from source
@@ -59,6 +59,8 @@ python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" selftest
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" healthcheck
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" list-profiles
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" score-models
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" init-workspace --cwd .
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" workspace-status --cwd .
 ```
 
 Expected result:
@@ -67,5 +69,7 @@ Expected result:
 - `healthcheck` can find Python config, Claude Code, and CCSwitch files.
 - `list-profiles` shows Claude-compatible CCSwitch profiles.
 - `score-models` returns local heuristic scores.
+- `init-workspace` creates `.agent-workspace/claude-code-orchestrator`.
+- `workspace-status` shows where runs, reports, dashboard, archives, rollback notes, templates, and policies will be written.
 
 Next: configure [MCP](/guide/mcp) so Codex can call the tools directly.

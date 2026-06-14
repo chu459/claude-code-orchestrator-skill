@@ -1,10 +1,10 @@
 {
   "name": "claude-code-orchestrator-skill",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "schema_version": 2,
   "released_at": "2026-06-14",
   "notes": [
-    "Adds rolling checkpoints, deduplicated tool-call summaries, default controller artifact writing, and exact queued/running/done/failed queue states on top of the v0.4 controller system."
+    "Adds workspace governance: .agent-workspace artifact routing, init-workspace, workspace-status, migrate-data, clean-workspace, archive-runs, repair-mcp-paths, folder-policy, and MCP tools for every governance action."
   ],
   "local_user_owned_files": [
     "scripts/cc-orchestrator/config/model_calibration.json",

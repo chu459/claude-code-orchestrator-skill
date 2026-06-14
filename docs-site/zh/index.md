@@ -36,7 +36,7 @@ CCSwitch 负责把不同 worker 分配到更合适的模型上。
 然后把这句话交给 Codex：
 
 ```text
-Install the Codex Skill and MCP server from https://github.com/chu459/claude-code-orchestrator-skill. Put the Skill at ~/.codex/skills/claude-code-orchestrator, wire the bundled MCP server into Codex config.toml, run selftest, healthcheck, score-models, and show me the selected multi-agent routing plan. Do not print secrets.
+Install the Codex Skill and MCP server from https://github.com/chu459/claude-code-orchestrator-skill. Put the Skill at ~/.codex/skills/claude-code-orchestrator, wire the bundled MCP server into Codex config.toml, run selftest, healthcheck, score-models, init-workspace, workspace-status, and show me the selected multi-agent routing plan. Do not print secrets.
 ```
 
 安装后跑：
@@ -45,6 +45,8 @@ Install the Codex Skill and MCP server from https://github.com/chu459/claude-cod
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" selftest
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" healthcheck
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" score-models
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" init-workspace --cwd .
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" workspace-status --cwd .
 ```
 
 如果你想看 worker 实时窗口，用：

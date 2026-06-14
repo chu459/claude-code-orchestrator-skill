@@ -1,4 +1,4 @@
 interface:
   display_name: "Claude Code Orchestrator"
-  short_description: "Route Claude Code worker roles through CCSwitch while Codex stays in control."
-  default_prompt: "Use $claude-code-orchestrator to plan or run Claude Code worker roles through CCSwitch, with Codex as controller."
+  short_description: "Route Claude Code workers through CCSwitch with managed .agent-workspace artifacts."
+  default_prompt: "Use $claude-code-orchestrator to initialize the agent workspace, route Claude Code workers through CCSwitch, and keep Codex in control."
