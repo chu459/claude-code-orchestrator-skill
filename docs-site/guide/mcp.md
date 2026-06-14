@@ -76,7 +76,7 @@ docs/mcp.codex.example.toml
 | `cc_init_workspace` | Initializes `.agent-workspace`, templates, policies, rollback/log dirs, and optional `CLAUDE.md` |
 | `cc_workspace_status` | Shows where Codex and Claude Code artifacts will be written |
 | `cc_migrate_data` | Previews or migrates old `runs`, `reports`, and `dashboard` |
-| `cc_clean_workspace` | Cleans tmp files, empty dirs, and expired runs, dry-run by default |
+| `cc_clean_workspace` | Cleans tmp files, non-scaffold empty dirs, and expired runs, dry-run by default |
 | `cc_archive_runs` | Zips old run folders under `archives/` |
 | `cc_repair_mcp_paths` | Repairs `.mcp.json` workspace and artifact env values |
 | `cc_folder_policy` | Returns or writes the managed-artifacts-only folder policy |

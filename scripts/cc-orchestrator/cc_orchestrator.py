@@ -14,6 +14,7 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -54,7 +55,36 @@ configure_stdio()
 
 
 ROOT = Path(__file__).resolve().parent
-SKILL_ROOT = ROOT.parent.parent
+
+
+def _has_skill_assets(candidate: Path) -> bool:
+    return (candidate / "version.json").exists() or (candidate / "references" / "prompt-pack").exists()
+
+
+def resolve_skill_root(root: Path) -> Path:
+    explicit = os.environ.get("CC_ORCHESTRATOR_SKILL_ROOT")
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+
+    candidates = [root.parent.parent, root, root.parent]
+    seen: set[Path] = set()
+    unique_candidates: list[Path] = []
+    for candidate in candidates:
+        resolved = candidate.expanduser().resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            unique_candidates.append(resolved)
+
+    for candidate in unique_candidates:
+        if (candidate / "version.json").exists() and (candidate / "references" / "prompt-pack").exists():
+            return candidate
+    for candidate in unique_candidates:
+        if _has_skill_assets(candidate):
+            return candidate
+    return root.parent.parent.resolve()
+
+
+SKILL_ROOT = resolve_skill_root(ROOT)
 CONFIG_DIR = ROOT / "config"
 AGENT_WORKSPACE_DIRNAME = ".agent-workspace"
 ARTIFACT_NAMESPACE = "claude-code-orchestrator"
@@ -443,6 +473,10 @@ def managed_dirs(paths: dict[str, Path]) -> list[Path]:
     return [paths[name] for name in ("runs", "teams", "reports", "dashboard", "archives", "rollback", "logs", "tmp", "templates", "policies")]
 
 
+def protected_scaffold_dirs(paths: dict[str, Path]) -> set[Path]:
+    return {path.resolve() for path in managed_dirs(paths)}
+
+
 def default_folder_policy(cwd: str | Path | None = None) -> dict[str, Any]:
     paths = workspace_paths(cwd)
     artifact_root = paths["artifact_root"]
@@ -472,7 +506,7 @@ def default_folder_policy(cwd: str | Path | None = None) -> dict[str, Any]:
         "commands": {
             "init_workspace": "May create .agent-workspace, templates, policy files, and an optional managed CLAUDE.md section.",
             "migrate_data": "May move legacy runs/reports/dashboard into artifact_root only when apply=true.",
-            "clean_workspace": "Dry-run by default. May delete only tmp files, empty dirs, or expired run folders under artifact_root.",
+            "clean_workspace": "Dry-run by default. May delete tmp contents, non-scaffold empty dirs, or expired run folders under artifact_root.",
             "archive_runs": "Archives run folders under artifact_root/archives. Removal requires apply=true and remove=true.",
             "repair_mcp_paths": "May update only .mcp.json MCP env path keys when apply=true.",
         },
@@ -705,6 +739,7 @@ def clean_workspace(cwd: str | Path | None = None, older_than_days: int = 30, dr
     paths = workspace_paths(cwd)
     artifact_root = paths["artifact_root"]
     actions: list[dict[str, Any]] = []
+    protected_dirs = protected_scaffold_dirs(paths)
     if not artifact_root.exists():
         return {"ok": True, "dry_run": dry_run, "artifact_root": str(artifact_root), "action_count": 0, "actions": []}
     for item in paths["tmp"].glob("*") if paths["tmp"].exists() else []:
@@ -719,6 +754,8 @@ def clean_workspace(cwd: str | Path | None = None, older_than_days: int = 30, dr
                 actions.append({"action": "delete_expired_run", "path": str(run_dir), "bytes": path_size(run_dir)})
     for item in sorted(artifact_root.rglob("*"), key=lambda p: len(p.parts), reverse=True):
         if item.is_dir():
+            if item.resolve() in protected_dirs:
+                continue
             try:
                 if not any(item.iterdir()):
                     actions.append({"action": "delete_empty_dir", "path": str(item), "bytes": 0})
@@ -2089,7 +2126,11 @@ def healthcheck() -> dict[str, Any]:
         "ccswitch_settings_exists": settings_path.exists(),
         "policy_exists": POLICY_PATH.exists(),
         "agents_exists": AGENTS_PATH.exists(),
+        "skill_root": str(SKILL_ROOT),
         "version_exists": VERSION_PATH.exists(),
+        "version_path": str(VERSION_PATH),
+        "prompt_pack_exists": PROMPT_PACK_DIR.exists(),
+        "prompt_pack_path": str(PROMPT_PACK_DIR),
     }
     try:
         profiles = list_profiles()
@@ -4476,11 +4517,17 @@ def selftest() -> dict[str, Any]:
     false_findings = secret_scan_text("input_tokens = estimate_tokens_from_text(prompt)", "selftest")
     status = workspace_status()
     policy = folder_policy(apply=False)
+    prompt_pack = list_prompt_pack()
+    with tempfile.TemporaryDirectory(prefix="cc-orchestrator-selftest-") as tmp:
+        init_workspace(cwd=tmp, write_claude=False)
+        clean_after_init = clean_workspace(cwd=tmp, dry_run=True)
     checks = {
         "utf8_env": env.get("PYTHONIOENCODING") == "utf-8" and env.get("PYTHONUTF8") == "1",
         "timeout_bytes_decode": decoded == "中文✅",
         "policy_exists": POLICY_PATH.exists(),
         "agents_exists": AGENTS_PATH.exists(),
+        "skill_root_assets": VERSION_PATH.exists() and PROMPT_PACK_DIR.exists(),
+        "prompt_pack_available": bool(prompt_pack.get("ok")) and bool(prompt_pack.get("templates")),
         "claude_md_template": "Assigned role: review" in claude_md and CLAUDE_MD_MARKER_BEGIN in claude_md,
         "secret_redaction": sample_github_token not in redacted and sample_api_key not in redacted,
         "secret_scan_detects_assignment": bool(secret_findings),
@@ -4491,6 +4538,7 @@ def selftest() -> dict[str, Any]:
         "workspace_root_configured": AGENT_WORKSPACE_DIRNAME in str(status.get("artifact_root")),
         "worker_env_artifact_root": worker_env.get("CC_ORCHESTRATOR_ARTIFACT_ROOT") == str(ARTIFACT_ROOT),
         "folder_policy_generated_only": "Only manage agent-generated artifacts" in str(policy.get("policy", {}).get("principle", "")),
+        "clean_workspace_preserves_scaffold": clean_after_init.get("action_count") == 0,
     }
     return {
         "ok": all(checks.values()),

@@ -24,7 +24,7 @@
   <a href="README.md"><img alt="Language: English" src="https://img.shields.io/badge/README-English-black"></a>
   <a href="README.md"><img alt="Default README: English" src="https://img.shields.io/badge/Default-English-blue"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-brightgreen"></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-v0.5.0-black">
+  <img alt="Version" src="https://img.shields.io/badge/version-v0.5.1-black">
   <img alt="Codex Skill" src="https://img.shields.io/badge/Codex-Skill-0A0A0A">
   <img alt="MCP Included" src="https://img.shields.io/badge/MCP-Included-blue">
   <img alt="CCSwitch" src="https://img.shields.io/badge/CCSwitch-Model_Router-purple">
@@ -80,11 +80,12 @@ Skill = Codex 的操作说明书
 <h2 align="center">更新日志</h2>
 
 <p align="center">
-  <b>当前版本：v0.5.0</b>
+  <b>当前版本：v0.5.1</b>
 </p>
 
 | 版本 | 更新内容 | 为什么重要 |
 | --- | --- | --- |
+| `v0.5.1` | 修复 GitHub issues #1 和 #2：轻量 `tools/cc-orchestrator` 复制布局现在能找到 `version.json` 和 Prompt Pack；`clean-workspace` 不再提示删除刚初始化出来的骨架目录。 | 工作区治理更稳：轻量工具目录可以独立运行，清理命令也不会把初始化结果拆掉。 |
 | `v0.5.0` | 新增工作区治理：`.agent-workspace` 产物路由、`init-workspace`、`workspace-status`、`migrate-data`、`clean-workspace`、`archive-runs`、`repair-mcp-paths`、`folder-policy`，并补齐对应 MCP 工具。 | Codex 现在能把 Claude Code worker 的日志、报告、看板、临时文件、回滚记录、模板和策略文件关进统一目录，不乱碰项目源码。 |
 | `v0.4.1` | 新增滚动 `checkpoint-###.md` 总结、工具调用去重摘要、默认写入总控摘要文件的 controller poll，以及明确的 `queued/running/done/failed` 队列状态。 | Codex 平时只看决策级摘要，raw 日志继续留在磁盘审计，既省额度又更好控场。 |
 | `v0.4.0` | 新增 Codex 总控手册、Prompt Pack、压缩版总控轮询、`cc_summarize_run`、`cc_compact_events`、一键验收评分、真正的队列策略、模型能力库、本机偏好保留、worker 质量历史、失败模式识别、时间线看板。 | Codex 不再只是等 worker 回来，而是能边看边管、发现跑偏就停、改完自动验收、持续学习哪个模型最适合哪类任务。 |
@@ -93,6 +94,17 @@ Skill = Codex 的操作说明书
 | `v0.1.0` | 完成 Skill + MCP + CLI 基座：CCSwitch 发现、模型评分、角色路由、`CLAUDE.md` 生成、可视 Claude Code 窗口、日志和安全默认值。 | 证明核心思路：Codex 当大脑，Claude Code 当执行层，CCSwitch 当本地模型路由器。 |
 
 <h3 align="center">详细版本说明</h3>
+
+<details open>
+<summary><b>v0.5.1 - 便携资产和安全清理</b></summary>
+
+- 修复 `tools/cc-orchestrator` 轻量复制布局：现在会从 `CC_ORCHESTRATOR_SKILL_ROOT`、完整 Skill 根目录，或 `scripts/cc-orchestrator` 同目录资产里发现资源。
+- 在 `scripts/cc-orchestrator` 下补入便携版 `version.json` 和 Prompt Pack。
+- `healthcheck` 新增 `skill_root`、`version_path`、`prompt_pack_path` 和 Prompt Pack 是否存在的输出。
+- 修复 `clean-workspace`：刚初始化出来的核心骨架目录即使为空，也会被保护。
+- selftest 新增 Prompt Pack 可用性和清理不删除骨架目录的回归检查。
+
+</details>
 
 <details open>
 <summary><b>v0.5.0 - 工作区治理</b></summary>

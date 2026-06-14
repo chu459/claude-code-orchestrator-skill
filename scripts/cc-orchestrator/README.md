@@ -41,7 +41,7 @@ The server discovers CCSwitch from environment variables and the current user ho
 - `cc_init_workspace` initializes `.agent-workspace`, templates, policy files, rollback/log dirs, and optional `CLAUDE.md`.
 - `cc_workspace_status` shows where Codex and Claude Code artifacts will be written.
 - `cc_migrate_data` previews or moves legacy `runs`, `reports`, and `dashboard` into the managed workspace.
-- `cc_clean_workspace` cleans tmp files, empty dirs, and expired run folders; dry-run by default.
+- `cc_clean_workspace` cleans tmp files, non-scaffold empty dirs, and expired run folders; dry-run by default.
 - `cc_archive_runs` zips selected or old run folders under `archives/`.
 - `cc_repair_mcp_paths` repairs `.mcp.json` workspace/artifact env values.
 - `cc_folder_policy` returns or writes the rule that only agent-generated artifacts are managed.

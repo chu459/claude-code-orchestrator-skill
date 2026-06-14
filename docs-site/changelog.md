@@ -2,6 +2,15 @@
 
 This page tracks the public docs-facing history of Claude Code Orchestrator Skill.
 
+## v0.5.1 - Portable assets and safer cleanup
+
+- Fixed GitHub issues #1 and #2.
+- Portable `tools/cc-orchestrator` copies now discover `version.json` and Prompt Pack assets.
+- `CC_ORCHESTRATOR_SKILL_ROOT` is now honored when users want to point the tool at a full Skill package.
+- `healthcheck` now reports `skill_root`, `version_path`, `prompt_pack_path`, and Prompt Pack availability.
+- `clean-workspace` now preserves freshly initialized scaffold folders instead of suggesting that they be deleted.
+- Selftest now covers Prompt Pack availability and scaffold-preserving cleanup.
+
 ## v0.5.0 - Workspace governance
 
 - Added `.agent-workspace/claude-code-orchestrator` as the default home for agent-generated artifacts.

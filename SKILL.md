@@ -302,7 +302,7 @@ Use the same role names through MCP:
 - `cc_init_workspace` initializes `.agent-workspace`, run/report/dashboard/archive/rollback/log/tmp/template/policy dirs, and optionally `CLAUDE.md`.
 - `cc_workspace_status` shows the exact paths where Codex and Claude Code artifacts will be written.
 - `cc_migrate_data` previews or moves legacy `runs`, `reports`, and `dashboard` into the managed workspace.
-- `cc_clean_workspace` cleans tmp files, empty dirs, and expired run folders; it is dry-run by default.
+- `cc_clean_workspace` cleans tmp files, non-scaffold empty dirs, and expired run folders; it is dry-run by default.
 - `cc_archive_runs` zips selected or old run folders into `archives/`.
 - `cc_repair_mcp_paths` repairs `.mcp.json` so MCP uses the managed workspace paths.
 - `cc_folder_policy` returns or writes the policy that limits folder management to agent-generated artifacts.

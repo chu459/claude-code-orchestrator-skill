@@ -2,6 +2,15 @@
 
 这里记录 Claude Code Orchestrator Skill 的主要版本变化。
 
+## v0.5.1 - 便携资产和安全清理
+
+- 修复 GitHub issues #1 和 #2。
+- 轻量 `tools/cc-orchestrator` 复制布局现在能发现 `version.json` 和 Prompt Pack。
+- 用户也可以用 `CC_ORCHESTRATOR_SKILL_ROOT` 指向完整 Skill 包。
+- `healthcheck` 新增 `skill_root`、`version_path`、`prompt_pack_path` 和 Prompt Pack 是否可用的输出。
+- `clean-workspace` 现在会保护刚初始化出来的骨架目录，不再提示删除它们。
+- selftest 新增 Prompt Pack 可用性和清理不删除骨架目录的回归检查。
+
 ## v0.5.0 - 工作区治理
 
 - 新增 `.agent-workspace/claude-code-orchestrator`，默认收纳 Agent 生成的运行产物。

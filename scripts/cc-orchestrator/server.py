@@ -1046,7 +1046,7 @@ async def cc_migrate_data(params: MigrateDataInput) -> str:
 
 @mcp.tool(name="cc_clean_workspace", annotations={"title": "Clean Agent Workspace", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False})
 async def cc_clean_workspace(params: CleanWorkspaceInput) -> str:
-    """Clean tmp files, empty dirs, and expired run artifacts. Dry-run by default."""
+    """Clean tmp files, non-scaffold empty dirs, and expired run artifacts. Dry-run by default."""
     try:
         return _json(clean_workspace(cwd=params.cwd, older_than_days=params.older_than_days, dry_run=params.dry_run))
     except Exception as exc:

@@ -15,7 +15,7 @@
 <p align="center">
   <a href="README.zh-CN.md"><img alt="README: 中文" src="https://img.shields.io/badge/README-中文-red"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-brightgreen"></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-v0.5.0-black">
+  <img alt="Version" src="https://img.shields.io/badge/version-v0.5.1-black">
   <img alt="Codex Skill" src="https://img.shields.io/badge/Codex-Skill-0A0A0A">
   <img alt="MCP Included" src="https://img.shields.io/badge/MCP-Included-blue">
   <img alt="CCSwitch" src="https://img.shields.io/badge/CCSwitch-Model_Router-purple">
@@ -60,11 +60,12 @@ This is a miniature cost-management operating system for multi-agent coding.
 <h2 align="center">Latest Updates</h2>
 
 <p align="center">
-  <b>Current version: v0.5.0</b>
+  <b>Current version: v0.5.1</b>
 </p>
 
 | Version | What changed | Why it matters |
 | --- | --- | --- |
+| `v0.5.1` | Fixed GitHub issues #1 and #2: portable `tools/cc-orchestrator` copies now discover `version.json` and Prompt Pack assets, and `clean-workspace` no longer suggests deleting freshly initialized scaffold folders. | Workspace governance is now safer and more portable: lightweight tool copies work, and cleanup does not undo initialization. |
 | `v0.5.0` | Added workspace governance: `.agent-workspace` artifact routing, `init-workspace`, `workspace-status`, `migrate-data`, `clean-workspace`, `archive-runs`, `repair-mcp-paths`, and `folder-policy`, with matching MCP tools. | Codex can now keep Claude Code worker logs, reports, dashboards, temp files, rollback notes, templates, and policies inside one managed folder without touching project source. |
 | `v0.4.1` | Added rolling `checkpoint-###.md` summaries, deduplicated tool-call summaries, default artifact-writing controller poll, and exact `queued/running/done/failed` queue states. | Codex can now inspect only decision-grade summaries while workers keep raw audit logs on disk. |
 | `v0.4.0` | Added the Codex Controller Playbook, Prompt Pack, compact controller-mode polling, `cc_summarize_run`, `cc_compact_events`, one-click verification scoring, real queue policy, model registry, local override preservation, worker quality history, failure-mode detection, and timeline dashboard. | Codex can now manage Claude Code workers like a real controller: watch compact progress, stop bad runs, verify changes, learn which model is best, and preserve local preferences across upgrades. |
@@ -75,13 +76,24 @@ This is a miniature cost-management operating system for multi-agent coding.
 <h3 align="center">Detailed Version Notes</h3>
 
 <details open>
+<summary><b>v0.5.1 - Portable Assets and Safer Cleanup</b></summary>
+
+- Fixed `tools/cc-orchestrator` lightweight copies so package assets can be discovered from `CC_ORCHESTRATOR_SKILL_ROOT`, the full Skill root, or colocated assets under `scripts/cc-orchestrator`.
+- Added a portable colocated `version.json` and Prompt Pack under `scripts/cc-orchestrator`.
+- Updated `healthcheck` to report `skill_root`, `version_path`, `prompt_pack_path`, and whether Prompt Pack assets exist.
+- Fixed `clean-workspace` so freshly initialized scaffold directories are protected even when empty.
+- Added selftest coverage for Prompt Pack availability and scaffold-preserving cleanup.
+
+</details>
+
+<details open>
 <summary><b>v0.5.0 - Workspace Governance</b></summary>
 
 - Added `.agent-workspace/claude-code-orchestrator` as the default home for agent-generated artifacts.
 - Added `init-workspace` to create runs, reports, dashboard, archives, rollback, logs, tmp, templates, and policies folders.
 - Added `workspace-status` to show exactly where Codex and Claude Code will write artifacts.
 - Added `migrate-data` to safely move legacy `runs`, `reports`, and `dashboard` data into the managed workspace.
-- Added `clean-workspace`, dry-run by default, to clean tmp files, empty folders, and expired run folders.
+- Added `clean-workspace`, dry-run by default, to clean tmp files, non-scaffold empty folders, and expired run folders.
 - Added `archive-runs` to zip old run folders into `archives/`.
 - Added `repair-mcp-paths` to update `.mcp.json` with `CC_ORCHESTRATOR_WORKSPACE_ROOT` and `CC_ORCHESTRATOR_ARTIFACT_ROOT`.
 - Added `folder-policy` to write a machine-readable rule: manage only agent artifacts, never project source.
@@ -443,7 +455,7 @@ python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" last-run
 | `cc_init_workspace` | Initialize `.agent-workspace`, templates, policy files, rollback/log dirs, and optional `CLAUDE.md` |
 | `cc_workspace_status` | Show exactly where Codex and Claude Code artifacts will be written |
 | `cc_migrate_data` | Dry-run or move legacy `runs`, `reports`, and `dashboard` into the managed workspace |
-| `cc_clean_workspace` | Clean tmp files, empty dirs, and expired run artifacts, dry-run by default |
+| `cc_clean_workspace` | Clean tmp files, non-scaffold empty dirs, and expired run artifacts, dry-run by default |
 | `cc_archive_runs` | Zip old run folders under `archives/` |
 | `cc_repair_mcp_paths` | Repair `.mcp.json` so MCP writes into the managed workspace |
 | `cc_folder_policy` | Return or write the rule that only agent artifacts are managed |
