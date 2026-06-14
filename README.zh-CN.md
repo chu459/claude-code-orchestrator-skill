@@ -46,6 +46,96 @@
 | `v0.2.x` | 新增实时控制：`run-streaming`、`poll-run`、`stop-run`、`run-status`、角色团队、交叉审查、看板、报告、成本护栏。 | Codex 可以边看边管 Claude Code worker，不用盲等结果。 |
 | `v0.1.x` | 完成 Skill + MCP + CLI 基座：CCSwitch 发现、模型评分、角色路由、`CLAUDE.md` 生成、可视 Claude Code 窗口、日志和安全默认值。 | 证明核心思路：Codex 当大脑，Claude Code 当执行层，CCSwitch 当本地模型路由器。 |
 
+<h3 align="center">详细版本说明</h3>
+
+<details open>
+<summary><b>v0.4.1 - 总控 checkpoint、工具去重、队列状态补强</b></summary>
+
+- 新增滚动 `checkpoints/checkpoint-###.md`，用于长任务阶段总结。
+- checkpoint 会写清楚：已做什么、发现什么、改了什么、还剩什么、是否跑偏。
+- 新增工具调用去重摘要，例如 `Grep x7`、`Read x3`。
+- `poll-run --mode controller` 默认写入总控摘要文件。
+- 总控摘要新增 `last_meaningful_action`、`new_findings`、`tool_call_summary`、`controller_attention_flags`。
+- 队列完成态改为 `done`，并明确支持 `queued`、`running`、`done`、`failed`、`timed_out`、`cancelled`。
+- 本地 HTML dashboard 增加顶部模型路由、左侧 workers、中间 timeline/logs、右侧 diff/risk/controls。
+
+</details>
+
+<details open>
+<summary><b>v0.4.0 - Codex 总控系统</b></summary>
+
+- 新增 `references/codex-controller-playbook.md`，把 Codex 调度规则抽成专门手册。
+- 写清楚什么时候 Codex 自己做，什么时候派 Claude Code worker。
+- 写清楚 poll 节奏、跑偏信号、stop 条件、cross-review 条件、写代码许可条件。
+- 新增 Prompt Pack：`repo-audit`、`bugfix`、`security-audit`、`frontend-polish`、`test-generation`、`refactor-plan`、`release-check`。
+- 新增 `cc_poll_run --mode controller`，默认让 Codex 看压缩摘要，不再读 raw events。
+- 新增 `cc_summarize_run` 和 `cc_compact_events`。
+- 新增总控产物：`progress_summary.json`、`latest_decision.md`、`risk_flags.json`、`changed_files.json`、`tool_timeline.md`。
+- 新增真正的队列策略：最大并发、优先级、重试、超时、状态统计。
+- 新增 `model_registry.json` 和 `model_benchmark_history.json`。
+- 新增 `local_policy.override.json`，升级时保留本机偏好。
+- 新增 worker 质量评分历史，记录是否解决、是否越界、是否泄密、是否浪费 token、是否需要返工。
+- 新增失败模式识别：卡住、重复搜索、大量无效输出、危险命令、测试失败还说成功、越界写文件、疑似密钥输出。
+- 模型能力库会合并 CCSwitch 扫描、benchmark 历史和 worker 质量历史。
+- 新增 MCP 工具：模型库、本机偏好、worker 评分、Prompt Pack、队列策略、事件压缩、run 总结。
+- 新增每日 GitHub 更新检查 automation 的 README 指引。
+
+</details>
+
+<details>
+<summary><b>v0.3.0 - 验收、打包、安全运行</b></summary>
+
+- 新增一键 `cc_verify_run`。
+- 把 diff summary、写入范围检查、密钥扫描、可选测试命令、Markdown 报告串成验收流水线。
+- 新增 run 结束后的写入范围硬检查。
+- 新增基于 git 快照的保守回滚助手。
+- 新增 mock streaming 端到端测试，不消耗模型额度也能测 streaming。
+- 新增 benchmark suite：代码、审查、安全、长上下文、多模态规划。
+- 新增每日用量统计。
+- 新增版本和升级状态机制。
+- 新增 Windows MCP 自动注册安装器。
+- 安装脚本加强本机配置保留。
+- 新增 `version.json` 版本元数据。
+
+</details>
+
+<details>
+<summary><b>v0.2.x - 实时 worker 控制</b></summary>
+
+- 新增 `run-streaming` / `cc_run_streaming_agent`。
+- Claude Code 通过 `--output-format stream-json --include-partial-messages` 启动。
+- 每次 run 写入实时 `events.ndjson`。
+- 新增 `poll-run`、`run-status`、`stop-run`。
+- 新增角色团队启动。
+- 新增团队结果汇总。
+- 新增交叉审查 worker loop。
+- 新增 run 报告和导出流程。
+- 新增本地 HTML dashboard 基础版。
+- 新增成本护栏：并发和超时。
+- 新增可视 Claude Code 窗口。
+
+</details>
+
+<details>
+<summary><b>v0.1.x - Skill、MCP、CLI、CCSwitch 基座</b></summary>
+
+- 创建 Codex Skill 入口。
+- 内置 MCP Server。
+- 新增 CLI orchestrator。
+- 新增 CCSwitch profile 发现。
+- 新增 Claude Code 二进制发现。
+- 新增本机模型按角色打分。
+- 新增按角色路由模型。
+- 默认只读 plan 模式。
+- 新增 Claude Code 子进程执行。
+- 新增 run metadata、prompt、stdout、stderr、last-run 日志。
+- 新增 `CLAUDE.md` worker 人设生成。
+- 新增 Windows UTF-8 输出保护。
+- 新增密钥脱敏默认策略。
+- 新增英文和中文 README 基础文档。
+
+</details>
+
 <h2 align="center">中文版</h2>
 
 众所周知，GPT / GPT Plus 很好用。

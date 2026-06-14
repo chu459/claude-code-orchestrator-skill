@@ -41,6 +41,96 @@
 | `v0.2.x` | Added live streaming control: `run-streaming`, `poll-run`, `stop-run`, `run-status`, team spawning, cross review, dashboard, reports, and cost guard. | Codex can watch and manage Claude Code workers in real time instead of waiting blindly. |
 | `v0.1.x` | Built the first Skill + MCP + CLI foundation with CCSwitch profile discovery, model scoring, role routing, `CLAUDE.md` generation, visible Claude Code windows, logs, and safe defaults. | Proved the core idea: Codex is the brain, Claude Code is the worker layer, CCSwitch is the local model router. |
 
+<h3 align="center">Detailed Version Notes</h3>
+
+<details open>
+<summary><b>v0.4.1 - Controller Checkpoints, Tool Dedup, Queue State Polish</b></summary>
+
+- Added rolling `checkpoints/checkpoint-###.md` files for long-running Claude Code workers.
+- Each checkpoint records what is done, what was found, what changed, what remains, and whether the worker is drifting.
+- Added deduplicated tool-call summaries, such as `Grep x7` and `Read x3`.
+- Made controller-mode `poll-run` write controller artifacts by default.
+- Added `last_meaningful_action`, `new_findings`, `tool_call_summary`, and `controller_attention_flags` to controller summaries.
+- Changed queue success state to `done`, with explicit `queued`, `running`, `done`, `failed`, `timed_out`, and `cancelled` states.
+- Polished the local HTML dashboard with top model routing, left worker list, center timeline/logs, and right diff/risk/control commands.
+
+</details>
+
+<details open>
+<summary><b>v0.4.0 - Codex Controller System</b></summary>
+
+- Added `references/codex-controller-playbook.md`, the dedicated Codex scheduling manual.
+- Documented when Codex should work directly and when it should delegate to Claude Code.
+- Documented poll cadence, stop signals, cross-review rules, write-permission rules, and verification gates.
+- Added Prompt Pack templates: `repo-audit`, `bugfix`, `security-audit`, `frontend-polish`, `test-generation`, `refactor-plan`, and `release-check`.
+- Added `cc_poll_run --mode controller` for compact controller summaries instead of raw event dumps.
+- Added `cc_summarize_run` and `cc_compact_events`.
+- Added controller artifacts: `progress_summary.json`, `latest_decision.md`, `risk_flags.json`, `changed_files.json`, and `tool_timeline.md`.
+- Added real queue policy support with max concurrency, priority, retry policy, timeout policy, and state summaries.
+- Added `model_registry.json` and `model_benchmark_history.json` support.
+- Added `local_policy.override.json` so local preferences survive GitHub updates.
+- Added worker quality scoring history for solved status, scope safety, secret safety, failure flags, token usage, hallucination, and rework.
+- Added automatic failure-mode detection for stalled workers, repeated search, excessive output, destructive command risk, test failure plus success claims, write-scope violations, and secret-like output.
+- Added model registry aggregation from CCSwitch scans, benchmark history, and worker quality history.
+- Added MCP tools for model registry, local policy, worker scoring, Prompt Pack rendering, queue policy, compact events, and run summaries.
+- Added daily Codex automation guidance for checking GitHub updates without auto-applying them.
+
+</details>
+
+<details>
+<summary><b>v0.3.0 - Verification, Packaging, and Safer Operations</b></summary>
+
+- Added one-click `cc_verify_run`.
+- Chained diff summary, write-scope check, secret scan, optional test commands, and Markdown report into the acceptance flow.
+- Added hard write-scope enforcement after runs.
+- Added a conservative rollback helper based on git snapshots.
+- Added mock streaming end-to-end tests, so streaming can be tested without spending model quota.
+- Added benchmark suite entrypoints for code, review, security, long-context, and multimodal planning tasks.
+- Added daily usage summaries from saved run logs.
+- Added upgrade and version state tracking.
+- Added Windows MCP auto-registration installer.
+- Added stronger install preservation rules for local config.
+- Added `version.json` as a single version metadata source.
+
+</details>
+
+<details>
+<summary><b>v0.2.x - Live Worker Control</b></summary>
+
+- Added `run-streaming` / `cc_run_streaming_agent`.
+- Started Claude Code with `--output-format stream-json --include-partial-messages`.
+- Wrote live `events.ndjson` files for each run.
+- Added `poll-run`, `run-status`, and `stop-run`.
+- Added role team spawning.
+- Added team result collection.
+- Added cross-review worker loops.
+- Added run reports and export flow.
+- Added local HTML dashboard foundation.
+- Added cost guard settings for concurrency and timeout.
+- Added visible Claude Code worker window support.
+
+</details>
+
+<details>
+<summary><b>v0.1.x - Skill, MCP, CLI, and CCSwitch Foundation</b></summary>
+
+- Created the Codex Skill entrypoint.
+- Added bundled MCP server.
+- Added CLI orchestrator.
+- Added CCSwitch profile discovery.
+- Added Claude Code binary discovery.
+- Added local model scoring by role.
+- Added role-based model routing.
+- Added default read-only planning mode.
+- Added Claude Code subprocess execution.
+- Added run metadata, prompt, stdout, stderr, and last-run logs.
+- Added `CLAUDE.md` worker persona generation.
+- Added UTF-8-safe Windows output handling.
+- Added safe secret redaction defaults.
+- Added English and Chinese README foundation.
+
+</details>
+
 <h2 align="center">Plain-English Pitch</h2>
 
 GPT-class models are excellent.
