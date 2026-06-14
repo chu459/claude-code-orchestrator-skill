@@ -1671,6 +1671,130 @@ def route_drift_summary(metadata: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def normalize_model_name(value: Any) -> str:
+    return re.sub(r"[^a-z0-9.]+", "", str(value or "").lower())
+
+
+def _number(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def extract_model_usage(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    candidates: list[Any] = [
+        payload.get("modelUsage"),
+        payload.get("model_usage"),
+    ]
+    usage = payload.get("usage")
+    if isinstance(usage, dict):
+        candidates.extend([usage.get("modelUsage"), usage.get("model_usage")])
+    message = payload.get("message")
+    if isinstance(message, dict):
+        candidates.extend([message.get("modelUsage"), message.get("model_usage"), message.get("model")])
+    for candidate in candidates:
+        if isinstance(candidate, dict) and candidate:
+            return candidate
+    return {}
+
+
+def extract_payload_model(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    for key in ("model", "actualModel", "actual_model"):
+        if payload.get(key):
+            return str(payload.get(key))
+    message = payload.get("message")
+    if isinstance(message, dict):
+        for key in ("model", "actualModel", "actual_model"):
+            if message.get(key):
+                return str(message.get(key))
+    usage = extract_model_usage(payload)
+    if usage:
+        ranked = sorted(
+            usage.items(),
+            key=lambda item: (
+                _number((item[1] or {}).get("costUSD") if isinstance(item[1], dict) else 0),
+                _number((item[1] or {}).get("inputTokens") if isinstance(item[1], dict) else 0)
+                + _number((item[1] or {}).get("outputTokens") if isinstance(item[1], dict) else 0),
+            ),
+            reverse=True,
+        )
+        if ranked:
+            return str(ranked[0][0])
+    return None
+
+
+def actual_route_from_payload(payload: Any, declared_model: Any = None) -> dict[str, Any]:
+    usage = extract_model_usage(payload)
+    actual_model = extract_payload_model(payload)
+    input_tokens = 0
+    output_tokens = 0
+    total_cost = 0.0
+    for item in usage.values():
+        if not isinstance(item, dict):
+            continue
+        input_tokens += int(_number(item.get("inputTokens") or item.get("input_tokens")))
+        output_tokens += int(_number(item.get("outputTokens") or item.get("output_tokens")))
+        total_cost += _number(item.get("costUSD") or item.get("cost_usd"))
+    declared = str(declared_model or "")
+    mismatch = bool(actual_model and declared and normalize_model_name(actual_model) != normalize_model_name(declared))
+    return {
+        "actual_model": actual_model,
+        "actual_model_usage": usage,
+        "actual_input_tokens": input_tokens,
+        "actual_output_tokens": output_tokens,
+        "actual_total_tokens": input_tokens + output_tokens if usage else None,
+        "actual_cost_usd": total_cost if usage else None,
+        "declared_model": declared or None,
+        "route_mismatch": mismatch,
+    }
+
+
+def actual_route_from_text(text: str, declared_model: Any = None) -> dict[str, Any]:
+    candidates = [text]
+    candidates.extend(reversed(text.splitlines()))
+    for candidate in candidates:
+        candidate = candidate.strip()
+        if not candidate:
+            continue
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        summary = actual_route_from_payload(payload, declared_model=declared_model)
+        if summary.get("actual_model") or summary.get("actual_model_usage"):
+            return summary
+    return actual_route_from_payload({}, declared_model=declared_model)
+
+
+def actual_route_summary(metadata: dict[str, Any]) -> dict[str, Any]:
+    profile = metadata.get("profile") or {}
+    declared_model = profile.get("model")
+    route = metadata.get("actual_route") or {}
+    actual_model = metadata.get("actual_model") or route.get("actual_model")
+    usage = metadata.get("actual_model_usage") or route.get("actual_model_usage") or {}
+    summary = {
+        "declared_profile": profile.get("name"),
+        "declared_model": declared_model,
+        "actual_model": actual_model,
+        "actual_model_usage": usage,
+        "actual_input_tokens": metadata.get("actual_input_tokens", route.get("actual_input_tokens")),
+        "actual_output_tokens": metadata.get("actual_output_tokens", route.get("actual_output_tokens")),
+        "actual_total_tokens": metadata.get("actual_total_tokens", route.get("actual_total_tokens")),
+        "actual_cost_usd": metadata.get("actual_cost_usd", route.get("actual_cost_usd")),
+    }
+    summary["route_mismatch"] = bool(
+        metadata.get("route_mismatch")
+        or route.get("route_mismatch")
+        or (actual_model and declared_model and normalize_model_name(actual_model) != normalize_model_name(declared_model))
+    )
+    return summary
+
+
 def changed_files_for_run(run_id: str) -> dict[str, Any]:
     run_dir = safe_run_dir(run_id)
     metadata = read_metadata(run_dir)
@@ -1714,6 +1838,7 @@ def detect_failure_modes(
     stderr_tail = tail_file(run_dir / "stderr.txt", chars=6000)
     merged_tail = f"{stdout_tail}\n{stderr_tail}"
     flags: list[dict[str, Any]] = []
+    metadata = read_metadata(run_dir)
 
     events = compact.get("items") or []
     last_event = events[-1] if events else {}
@@ -1722,7 +1847,7 @@ def detect_failure_modes(
         flags.append({"code": "stalled", "severity": "medium", "category": "liveness", "confidence": "medium", "message": f"No compact event for {int(last_age)} seconds."})
     if status.get("timed_out") or status.get("status") == "timed_out":
         flags.append({"code": "timed_out", "severity": "high", "category": "liveness", "confidence": "high", "message": "Worker exceeded timeout."})
-    output_budget = output_budget_from_metadata(read_metadata(run_dir), run_dir)
+    output_budget = output_budget_from_metadata(metadata, run_dir)
     if str(output_budget.get("state")) in {"stopped", "truncated"}:
         flags.append({"code": "output_budget_exceeded", "severity": "high", "category": "output_budget", "confidence": "high", "message": f"Output budget policy triggered: {output_budget.get('stop_reason') or output_budget.get('state')}.", "output_budget": output_budget})
     elif int(output_budget.get("observed_output_bytes") or 0) > int(output_budget.get("soft_output_bytes") or 500_000):
@@ -1737,6 +1862,20 @@ def detect_failure_modes(
 
     if FAILURE_PATTERNS["test_failed"].search(merged_tail) and FAILURE_PATTERNS["claimed_success"].search(merged_tail):
         flags.append({"code": "success_claim_after_test_failure", "severity": "high", "category": "quality", "confidence": "medium", "message": "Output appears to claim success while also containing test failure text."})
+
+    actual_route = actual_route_summary(metadata)
+    if actual_route.get("route_mismatch"):
+        flags.append(
+            {
+                "code": "route_mismatch",
+                "severity": "high",
+                "category": "routing",
+                "confidence": "high",
+                "message": "Declared route model differs from Claude stream modelUsage.",
+                "declared_model": actual_route.get("declared_model"),
+                "actual_model": actual_route.get("actual_model"),
+            }
+        )
 
     try:
         scope = check_write_scope(run_id=run_id)
@@ -2317,7 +2456,10 @@ def healthcheck() -> dict[str, Any]:
     try:
         profiles = list_profiles()
         result["profile_count"] = len(profiles)
-        result["current_profile"] = next((p["name"] for p in profiles if p["current"]), None)
+        current = next((p for p in profiles if p.get("current")), None)
+        result["current_profile"] = current.get("name") if current else None
+        result["current_profile_model"] = current.get("model") if current else None
+        result["actual_model_usage_note"] = "Streaming runs record Claude result modelUsage as actual_model_usage and flag route_mismatch when it differs from the declared route."
     except Exception as exc:
         result["ok"] = False
         result["profiles_error"] = str(exc)
@@ -2472,7 +2614,7 @@ def run_agent(
         "command": redact(cmd),
     }
     metadata["git_before"] = capture_git_snapshot(run_dir, effective_cwd, "before")
-    (run_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_metadata(run_dir, metadata)
     (run_dir / "prompt.txt").write_text(safe_prompt, encoding="utf-8")
     try:
         proc = subprocess.run(
@@ -2499,6 +2641,7 @@ def run_agent(
     safe_stderr = redact(stderr)
     (run_dir / "stdout.txt").write_text(str(safe_stdout), encoding="utf-8")
     (run_dir / "stderr.txt").write_text(str(safe_stderr), encoding="utf-8")
+    actual_route = actual_route_from_text(str(stdout), declared_model=(metadata.get("profile") or {}).get("model"))
     metadata.update(
         {
             "finished_at": datetime.now(timezone.utc).isoformat(),
@@ -2510,11 +2653,24 @@ def run_agent(
             "git_after": capture_git_snapshot(run_dir, effective_cwd, "after"),
         }
     )
-    (run_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    if actual_route.get("actual_model") or actual_route.get("actual_model_usage"):
+        metadata.update(
+            {
+                "actual_route": actual_route,
+                "actual_model": actual_route.get("actual_model"),
+                "actual_model_usage": actual_route.get("actual_model_usage"),
+                "actual_input_tokens": actual_route.get("actual_input_tokens"),
+                "actual_output_tokens": actual_route.get("actual_output_tokens"),
+                "actual_total_tokens": actual_route.get("actual_total_tokens"),
+                "actual_cost_usd": actual_route.get("actual_cost_usd"),
+                "route_mismatch": actual_route.get("route_mismatch"),
+            }
+        )
+    write_metadata(run_dir, metadata)
     scope_check = check_write_scope(run_id=run_id)
     metadata["write_scope_check"] = scope_check
     metadata["acceptance_status"] = "blocked_write_scope" if not scope_check.get("ok", True) else "pending_controller_review"
-    (run_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_metadata(run_dir, metadata)
     latest_path = RUNS_DIR / "latest.txt"
     latest_path.write_text(run_id, encoding="utf-8")
     return {
@@ -2737,6 +2893,8 @@ def stream_worker(run_id: str) -> dict[str, Any]:
     budget_lock = threading.Lock()
     budget = output_budget_from_metadata(metadata, run_dir)
     budget_stop = threading.Event()
+    actual_route_recorded = threading.Event()
+    route_mismatch_recorded = threading.Event()
 
     def persist_budget_unlocked(stop_reason: str | None = None) -> None:
         latest = read_metadata(run_dir)
@@ -2770,7 +2928,7 @@ def stream_worker(run_id: str) -> dict[str, Any]:
         if not budget.get("final_only"):
             return True
         payload = event.get("payload")
-        if event.get("type") in {"run_started", "process_started", "process_exited", "output_budget_exceeded", "timeout", "stream_worker_ready"}:
+        if event.get("type") in {"run_started", "process_started", "process_exited", "output_budget_exceeded", "timeout", "stream_worker_ready", "actual_model_usage", "route_mismatch"}:
             return True
         if isinstance(payload, dict):
             event_type = str(payload.get("type") or "")
@@ -2799,6 +2957,46 @@ def stream_worker(run_id: str) -> dict[str, Any]:
             append_event(run_dir, event)
             with budget_lock:
                 budget["events_bytes"] = events_path.stat().st_size if events_path.exists() else current_events + len(encoded)
+
+    def record_actual_route(payload: Any) -> None:
+        declared_model = (metadata.get("profile") or {}).get("model")
+        summary = actual_route_from_payload(payload, declared_model=declared_model)
+        if not summary.get("actual_model") and not summary.get("actual_model_usage"):
+            return
+        update_metadata(
+            run_dir,
+            actual_route=summary,
+            actual_model=summary.get("actual_model"),
+            actual_model_usage=summary.get("actual_model_usage"),
+            actual_input_tokens=summary.get("actual_input_tokens"),
+            actual_output_tokens=summary.get("actual_output_tokens"),
+            actual_total_tokens=summary.get("actual_total_tokens"),
+            actual_cost_usd=summary.get("actual_cost_usd"),
+            route_mismatch=summary.get("route_mismatch"),
+        )
+        if not actual_route_recorded.is_set():
+            actual_route_recorded.set()
+            safe_append(
+                {
+                    "type": "actual_model_usage",
+                    "declared_model": summary.get("declared_model"),
+                    "actual_model": summary.get("actual_model"),
+                    "actual_total_tokens": summary.get("actual_total_tokens"),
+                    "actual_cost_usd": summary.get("actual_cost_usd"),
+                    "route_mismatch": summary.get("route_mismatch"),
+                }
+            )
+        if summary.get("route_mismatch") and not route_mismatch_recorded.is_set():
+            route_mismatch_recorded.set()
+            safe_append(
+                {
+                    "type": "route_mismatch",
+                    "severity": "high",
+                    "declared_model": summary.get("declared_model"),
+                    "actual_model": summary.get("actual_model"),
+                    "message": "Claude stream modelUsage does not match the orchestrator-declared route model.",
+                }
+            )
 
     def pump(stream: Any, out_path: Path, source: str) -> None:
         try:
@@ -2835,6 +3033,8 @@ def stream_worker(run_id: str) -> dict[str, Any]:
                     else:
                         parsed_payload = {"text": safe_line.rstrip("\r\n")}
                         parsed_event_type = "stderr"
+                    if source == "stdout" and isinstance(parsed_payload, dict):
+                        record_actual_route(parsed_payload)
                     if budget.get("final_only") and not event_is_final_or_control({"type": parsed_event_type, "source": source, "payload": parsed_payload}):
                         with budget_lock:
                             budget["dropped_output_bytes"] = int(budget.get("dropped_output_bytes") or 0) + raw_bytes
@@ -2985,8 +3185,16 @@ def single_run_status(run_id: str, include_output_tail: bool = True, tail_chars:
     event_summary = summarize_events(events)
     stdout_tail = tail_file(stdout_path, chars=tail_chars)
     stderr_tail = tail_file(stderr_path, chars=min(tail_chars, 2000))
+    stdout_bytes = stdout_path.stat().st_size if stdout_path.exists() else 0
+    stderr_bytes = stderr_path.stat().st_size if stderr_path.exists() else 0
+    events_bytes = events_path.stat().st_size if events_path.exists() else 0
+    prompt_path = run_dir / "prompt.txt"
+    prompt_text = prompt_path.read_text(encoding="utf-8", errors="replace") if prompt_path.exists() else ""
+    input_tokens_est = max(0, int(len(prompt_text) / 4))
+    output_tokens_est = max(0, int((stdout_bytes + stderr_bytes) / 4))
     output_budget = output_budget_from_metadata(metadata, run_dir)
     route_drift = route_drift_summary(metadata)
+    actual_route = actual_route_summary(metadata)
     result = {
         "ok": True,
         "run_id": run_id,
@@ -3007,11 +3215,18 @@ def single_run_status(run_id: str, include_output_tail: bool = True, tail_chars:
         "profile": metadata.get("profile"),
         "route": metadata.get("route"),
         "route_drift": route_drift,
+        "actual_route": actual_route,
+        "actual_model": actual_route.get("actual_model"),
+        "actual_model_usage": actual_route.get("actual_model_usage"),
+        "route_mismatch": actual_route.get("route_mismatch"),
         "latest_phase": event_summary.get("latest_phase"),
         "tool_calls": event_summary.get("tool_calls", []),
-        "stdout_bytes": stdout_path.stat().st_size if stdout_path.exists() else 0,
-        "stderr_bytes": stderr_path.stat().st_size if stderr_path.exists() else 0,
-        "events_bytes": events_path.stat().st_size if events_path.exists() else 0,
+        "stdout_bytes": stdout_bytes,
+        "stderr_bytes": stderr_bytes,
+        "events_bytes": events_bytes,
+        "input_tokens_est": input_tokens_est,
+        "output_tokens_est": output_tokens_est,
+        "total_tokens_est": input_tokens_est + output_tokens_est,
         "output_budget": output_budget,
         "last_stdout_line": last_nonempty_line(stdout_tail),
         "last_stderr_line": last_nonempty_line(stderr_tail),
@@ -4049,6 +4264,7 @@ def dashboard(include_finished: bool = True, limit: int = 12, open_browser: bool
             timeline_text = ""
         output_budget = item.get("output_budget") or {}
         route_drift = item.get("route_drift") or {}
+        actual_route = item.get("actual_route") or {}
         source_changes = changed.get("project_source_changes") or {}
         artifact_changes = changed.get("agent_artifact_changes") or {}
         max_severity = str(risk.get("max_severity") or "none")
@@ -4059,12 +4275,16 @@ def dashboard(include_finished: bool = True, limit: int = 12, open_browser: bool
         active_text = "active" if item.get("active") else "inactive"
         role = str(item.get("role") or "worker")
         status_text = str(item.get("status") or "unknown")
-        model = str((item.get("profile") or {}).get("model") or "unknown")
+        declared_model = str((item.get("profile") or {}).get("model") or "unknown")
+        actual_model = str(actual_route.get("actual_model") or item.get("actual_model") or "")
+        model = actual_model or declared_model
         route_changed = "yes" if route_drift.get("route_changed") else "no"
+        route_mismatch = "yes" if actual_route.get("route_mismatch") or item.get("route_mismatch") else "no"
         workers.append(
             f"<button class='worker' data-role='{html_lib.escape(role)}' data-status='{html_lib.escape(status_text)}' data-risk='{html_lib.escape(max_severity)}' data-active='{html_lib.escape(active_text)}' data-model='{html_lib.escape(model)}'>"
             f"<span><b>{html_lib.escape(role)}</b><code>{run_id}</code></span>"
-            f"<small>{html_lib.escape(status_text)} / {active_text} / {html_lib.escape(model)}</small>"
+            f"<small>{html_lib.escape(status_text)} / {active_text} / actual {html_lib.escape(model)}</small>"
+            f"<small>declared {html_lib.escape(declared_model)} / mismatch {route_mismatch}</small>"
             f"<small>risk {html_lib.escape(max_severity)} / budget {html_lib.escape(budget_state)} / route drift {route_changed}</small></button>"
         )
         timeline_lines = "".join(f"<li>{html_lib.escape(line[2:] if line.startswith('- ') else line)}</li>" for line in timeline_text.splitlines() if line.startswith("- "))
@@ -4085,8 +4305,11 @@ def dashboard(include_finished: bool = True, limit: int = 12, open_browser: bool
             f"controller-report --run-id {run_id}",
         ]
         controls = "".join(f"<li><code>{html_lib.escape(command)}</code></li>" for command in control_lines)
+        token_est = item.get("total_tokens_est")
         budget_lines = [
             f"state `{budget_state}`",
+            f"tokens est `{token_est if token_est is not None else 'unknown'}`",
+            f"actual cost usd `{actual_route.get('actual_cost_usd') if actual_route.get('actual_cost_usd') is not None else 'unknown'}`",
             f"stdout `{item.get('stdout_bytes', 0)}` bytes",
             f"stderr `{item.get('stderr_bytes', 0)}` bytes",
             f"events `{item.get('events_bytes', 0)}` bytes",
@@ -4094,8 +4317,8 @@ def dashboard(include_finished: bool = True, limit: int = 12, open_browser: bool
         ]
         budget_html = "".join(f"<li>{html_lib.escape(line)}</li>" for line in budget_lines)
         route_html = (
-            f"<p>Route: {html_lib.escape(str(route_drift.get('previous_model') or 'none'))} -> "
-            f"{html_lib.escape(str(route_drift.get('current_model') or model))}; drift {route_changed}</p>"
+            f"<p>Route: declared {html_lib.escape(declared_model)} / actual {html_lib.escape(actual_model or 'unknown')} / mismatch {route_mismatch}; "
+            f"follow-up drift {route_changed}</p>"
         )
         risks.append(
             f"<section class='panel'><h2>Diff / Risk / Controls <code>{run_id}</code></h2>"
@@ -4202,7 +4425,7 @@ def controller_report(
         dashboard_result = {"ok": True, "path": str(dashboard_path), "run_count": None, "opened": False}
     else:
         dashboard_result = dashboard(include_finished=include_finished, limit=min(limit, 8), open_browser=False)
-    usage = daily_usage_summary(date=date, write_report=True)
+    usage_summary = daily_usage_summary(date=date, write_report=True)
     if run_id:
         run_ids = [run_id]
     elif team_id:
@@ -4218,6 +4441,7 @@ def controller_report(
     for rid in run_ids:
         try:
             status = single_run_status(rid, include_output_tail=False)
+            usage = estimate_run_usage(rid)
             changed = changed_files_for_run(rid)
             risks = detect_failure_modes(rid, status=status, changed_files=changed)
             scan = secret_scan_run(rid, include_diff=False)
@@ -4236,19 +4460,27 @@ def controller_report(
         for key, count in (scan.get("classification_counts") or {}).items():
             secret_summary[str(key)] = secret_summary.get(str(key), 0) + int(count)
         budget = status.get("output_budget") or {}
+        actual_route = status.get("actual_route") or {}
         run_rows.append(
             {
                 "run_id": rid,
                 "status": status.get("status"),
                 "active": status.get("active"),
                 "role": status.get("role"),
-                "model": (status.get("profile") or {}).get("model"),
+                "model": usage.get("model"),
+                "declared_model": usage.get("declared_model") or (status.get("profile") or {}).get("model"),
+                "actual_model": usage.get("actual_model") or actual_route.get("actual_model"),
+                "route_mismatch": usage.get("route_mismatch") or actual_route.get("route_mismatch"),
+                "duration_ms": usage.get("duration_ms") if usage.get("duration_ms") is not None else status.get("elapsed_ms"),
+                "tokens_est": usage.get("total_tokens_est") if usage.get("total_tokens_est") is not None else status.get("total_tokens_est"),
+                "actual_cost_usd": usage.get("actual_cost_usd") if usage.get("actual_cost_usd") is not None else actual_route.get("actual_cost_usd"),
                 "stdout_bytes": status.get("stdout_bytes"),
                 "stderr_bytes": status.get("stderr_bytes"),
                 "events_bytes": status.get("events_bytes"),
                 "budget_state": budget.get("state"),
                 "stop_reason": status.get("stop_reason") or budget.get("stop_reason"),
                 "risk_max_severity": risks.get("max_severity"),
+                "risk_warning_count": risks.get("warning_count"),
                 "risk_blocking_count": risks.get("blocking_count"),
                 "source_change_count": source.get("changed_count", 0),
                 "artifact_change_count": artifacts.get("changed_count", 0),
@@ -4263,7 +4495,7 @@ def controller_report(
     recommendations: list[str] = []
     if blocking_runs:
         recommendations.append("Review blocking risk runs before accepting worker output.")
-    if usage.get("budget_stop_count"):
+    if usage_summary.get("budget_stop_count"):
         recommendations.append("Tune output budgets or switch noisy tasks to final-only mode.")
     if secret_summary.get("real_secret_candidate"):
         recommendations.append("Inspect redacted secret findings and rotate any exposed credentials.")
@@ -4283,17 +4515,36 @@ def controller_report(
         f"- Max risk severity: `{max_severity}`",
         f"- Blocking risk runs: `{blocking_runs}`",
         f"- Dashboard: `{dashboard_result.get('path')}`",
-        f"- Usage summary: `{usage.get('report_path')}`",
-        f"- Output bytes: `{usage.get('total_output_bytes')}`",
-        f"- Events bytes: `{usage.get('total_events_bytes')}`",
-        f"- Output budget stops: `{usage.get('budget_stop_count')}`",
+        f"- Usage summary: `{usage_summary.get('report_path')}`",
+        f"- Estimated tokens: `{usage_summary.get('total_tokens_est')}`",
+        f"- Total duration: `{usage_summary.get('total_duration_ms')}` ms",
+        f"- Output bytes: `{usage_summary.get('total_output_bytes')}`",
+        f"- Events bytes: `{usage_summary.get('total_events_bytes')}`",
+        f"- Output budget stops: `{usage_summary.get('budget_stop_count')}`",
+        "",
+        "## By Model Usage",
+    ]
+    by_model = usage_summary.get("by_model") or {}
+    if by_model:
+        for model, bucket in sorted(by_model.items()):
+            lines.append(
+                f"- `{model}`: runs `{bucket.get('runs')}`, failures `{bucket.get('failures')}`, duration `{bucket.get('duration_ms')}` ms, "
+                f"tokens `{bucket.get('tokens_est')}`, output `{bucket.get('output_bytes')}` bytes, events `{bucket.get('events_bytes')}` bytes, "
+                f"budget stops `{bucket.get('budget_stops')}`, warnings `{bucket.get('warning_count')}`, blocking `{bucket.get('blocking_count')}`, "
+                f"route mismatches `{bucket.get('route_mismatch_count')}`, max severity `{bucket.get('max_severity')}`"
+            )
+    else:
+        lines.append("- No model usage recorded.")
+    lines.extend(
+        [
         "",
         "## Source vs Artifacts",
         f"- Project source changed paths: `{len(set(source_paths))}`",
         f"- Agent artifact changed paths: `{len(set(artifact_paths))}`",
         "",
         "## Secret Scan",
-    ]
+        ]
+    )
     if secret_summary:
         lines.extend(f"- `{key}`: `{value}`" for key, value in sorted(secret_summary.items()))
     else:
@@ -4302,7 +4553,10 @@ def controller_report(
     for row in run_rows:
         lines.append(
             f"- `{row.get('run_id')}` role `{row.get('role')}` model `{row.get('model')}` status `{row.get('status')}` "
-            f"risk `{row.get('risk_max_severity')}` budget `{row.get('budget_state')}` source `{row.get('source_change_count')}` artifacts `{row.get('artifact_change_count')}`"
+            f"declared `{row.get('declared_model')}` actual `{row.get('actual_model') or 'unknown'}` mismatch `{row.get('route_mismatch')}` "
+            f"duration `{row.get('duration_ms')}` ms tokens `{row.get('tokens_est')}` cost `{row.get('actual_cost_usd')}` stdout `{row.get('stdout_bytes')}` events `{row.get('events_bytes')}` "
+            f"risk `{row.get('risk_max_severity')}` warnings `{row.get('risk_warning_count')}` blocking `{row.get('risk_blocking_count')}` "
+            f"budget `{row.get('budget_state')}` source `{row.get('source_change_count')}` artifacts `{row.get('artifact_change_count')}`"
         )
     lines.extend(["", "## Recommendations"])
     lines.extend(f"- {item}" for item in recommendations)
@@ -4313,11 +4567,12 @@ def controller_report(
         "ok": True,
         "path": str(path),
         "dashboard_path": dashboard_result.get("path"),
-        "usage_summary_path": usage.get("report_path"),
+        "usage_summary_path": usage_summary.get("report_path"),
         "run_count": len(run_rows),
         "active_count": run_status(include_finished=False).get("active_count", 0),
         "max_severity": max_severity,
         "blocking_runs": blocking_runs,
+        "by_model_usage": by_model,
         "secret_classification_counts": secret_summary,
         "source_change_count": len(set(source_paths)),
         "artifact_change_count": len(set(artifact_paths)),
@@ -4555,8 +4810,14 @@ def estimate_run_usage(run_id: str) -> dict[str, Any]:
     stderr_bytes = stderr_path.stat().st_size if stderr_path.exists() else 0
     events_bytes = events_path.stat().st_size if events_path.exists() else 0
     profile = metadata.get("profile") or {}
+    actual_route = actual_route_summary(metadata)
+    declared_model = profile.get("model")
+    actual_model = actual_route.get("actual_model")
     input_tokens = estimate_tokens_from_text(prompt)
     output_tokens = max(0, int((stdout_bytes + stderr_bytes) / 4))
+    if actual_route.get("actual_total_tokens") is not None:
+        input_tokens = int(actual_route.get("actual_input_tokens") or 0)
+        output_tokens = int(actual_route.get("actual_output_tokens") or 0)
     output_budget = output_budget_from_metadata(metadata, run_dir)
     return {
         "run_id": run_id,
@@ -4565,17 +4826,36 @@ def estimate_run_usage(run_id: str) -> dict[str, Any]:
         "status": metadata.get("status") or ("succeeded" if metadata.get("exit_code") == 0 else "failed" if metadata.get("exit_code") is not None else "unknown"),
         "role": metadata.get("role"),
         "profile": profile.get("name"),
-        "model": profile.get("model"),
+        "model": actual_model or declared_model,
+        "model_source": "actual_model_usage" if actual_model else "declared_route",
+        "declared_model": declared_model,
+        "actual_model": actual_model,
+        "actual_model_usage": actual_route.get("actual_model_usage"),
+        "route_mismatch": actual_route.get("route_mismatch"),
         "duration_ms": metadata.get("duration_ms"),
         "input_tokens_est": input_tokens,
         "output_tokens_est": output_tokens,
         "total_tokens_est": input_tokens + output_tokens,
+        "actual_cost_usd": actual_route.get("actual_cost_usd"),
         "stdout_bytes": stdout_bytes,
         "stderr_bytes": stderr_bytes,
         "events_bytes": events_bytes,
         "output_budget": output_budget,
         "stop_reason": metadata.get("stop_reason") or output_budget.get("stop_reason"),
     }
+
+
+def risk_snapshot_for_usage(run_id: str) -> dict[str, Any]:
+    run_dir = safe_run_dir(run_id)
+    cached = run_dir / CONTROLLER_ARTIFACTS["risk_flags"]
+    if cached.exists():
+        data = read_json_file(cached, {})
+        if data:
+            return data
+    try:
+        return detect_failure_modes(run_id)
+    except Exception as exc:
+        return risk_summary([{"code": "risk_snapshot_failed", "severity": "low", "blocking": False, "message": str(exc)}])
 
 
 def score_worker(
@@ -4659,17 +4939,45 @@ def daily_usage_summary(date: str | None = None, write_report: bool = False) -> 
             continue
         started = str(usage.get("started_at") or "")
         if started.startswith(target_date):
+            risks = risk_snapshot_for_usage(path.name)
+            usage["risk_max_severity"] = risks.get("max_severity", "none")
+            usage["risk_warning_count"] = int(risks.get("warning_count") or 0)
+            usage["risk_blocking_count"] = int(risks.get("blocking_count") or 0)
+            usage["risk_flag_count"] = int(risks.get("flag_count") or 0)
             runs.append(usage)
     by_model: dict[str, dict[str, Any]] = {}
     for item in runs:
         model = str(item.get("model") or "unknown")
-        bucket = by_model.setdefault(model, {"runs": 0, "failures": 0, "duration_ms": 0, "tokens_est": 0, "output_bytes": 0, "budget_stops": 0})
+        bucket = by_model.setdefault(
+            model,
+            {
+                "runs": 0,
+                "failures": 0,
+                "duration_ms": 0,
+                "tokens_est": 0,
+                "output_bytes": 0,
+                "events_bytes": 0,
+                "budget_stops": 0,
+                "warning_count": 0,
+                "blocking_count": 0,
+                "route_mismatch_count": 0,
+                "max_severity": "none",
+            },
+        )
         bucket["runs"] += 1
         if item.get("status") not in {"succeeded", "stopped"}:
             bucket["failures"] += 1
         bucket["duration_ms"] += int(item.get("duration_ms") or 0)
         bucket["tokens_est"] += int(item.get("total_tokens_est") or 0)
         bucket["output_bytes"] += int(item.get("stdout_bytes") or 0) + int(item.get("stderr_bytes") or 0)
+        bucket["events_bytes"] += int(item.get("events_bytes") or 0)
+        bucket["warning_count"] += int(item.get("risk_warning_count") or 0)
+        bucket["blocking_count"] += int(item.get("risk_blocking_count") or 0)
+        if item.get("route_mismatch"):
+            bucket["route_mismatch_count"] += 1
+        severity = str(item.get("risk_max_severity") or "none")
+        if SEVERITY_ORDER.get(severity, 0) > SEVERITY_ORDER.get(str(bucket.get("max_severity") or "none"), 0):
+            bucket["max_severity"] = severity
         if item.get("stop_reason") in {"output_budget_exceeded", "events_budget_exceeded"}:
             bucket["budget_stops"] += 1
     result = {
@@ -4691,7 +4999,7 @@ def daily_usage_summary(date: str | None = None, write_report: bool = False) -> 
         path = REPORTS_DIR / f"usage-{target_date}.md"
         lines = ["# Daily Usage Summary", "", f"Date: `{target_date}`", "", f"- Runs: `{result['run_count']}`", f"- Estimated tokens: `{result['total_tokens_est']}`", f"- Output bytes: `{result['total_output_bytes']}`", f"- Events bytes: `{result['total_events_bytes']}`", f"- Output budget stops: `{result['budget_stop_count']}`", f"- Failures: `{result['failure_count']}`", "", "## By Model"]
         for model, bucket in by_model.items():
-            lines.append(f"- `{model}`: runs `{bucket['runs']}`, failures `{bucket['failures']}`, output bytes `{bucket['output_bytes']}`, budget stops `{bucket['budget_stops']}`, estimated tokens `{bucket['tokens_est']}`")
+            lines.append(f"- `{model}`: runs `{bucket['runs']}`, failures `{bucket['failures']}`, duration `{bucket['duration_ms']}` ms, output bytes `{bucket['output_bytes']}`, events bytes `{bucket['events_bytes']}`, budget stops `{bucket['budget_stops']}`, warnings `{bucket['warning_count']}`, blocking `{bucket['blocking_count']}`, route mismatches `{bucket['route_mismatch_count']}`, max severity `{bucket['max_severity']}`, estimated tokens `{bucket['tokens_est']}`")
         path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
         result["report_path"] = str(path)
     return result
@@ -5173,7 +5481,7 @@ def run_visible_agent(
         "bootstrap_path": str(bootstrap_path),
         "env": redact(env_for_log),
     }
-    (run_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_metadata(run_dir, metadata)
     subprocess.Popen(
         [
             "powershell",
@@ -5489,6 +5797,10 @@ def selftest() -> dict[str, Any]:
     placeholder_findings = secret_scan_text("OPENAI_API_KEY=sk-your-placeholder-token", ".env.example")
     false_findings = secret_scan_text("input_tokens = estimate_tokens_from_text(prompt)", "selftest")
     warning_risks = risk_summary([{"code": "soft_output", "severity": "medium", "blocking": False, "message": "warning only"}])
+    actual_route = actual_route_from_payload(
+        {"modelUsage": {"glm-5.2": {"inputTokens": 100, "outputTokens": 25, "costUSD": 0.12}}},
+        declared_model="qwen3.7-plus",
+    )
     status = workspace_status()
     policy = folder_policy(apply=False)
     prompt_pack = list_prompt_pack()
@@ -5519,6 +5831,7 @@ def selftest() -> dict[str, Any]:
         "secret_scan_downgrades_placeholder": bool(placeholder_findings) and placeholder_findings[0].get("classification") == "placeholder_or_example" and not placeholder_findings[0].get("blocking"),
         "secret_scan_ignores_token_words": not false_findings,
         "risk_warning_not_blocking": warning_risks.get("ok") and warning_risks.get("has_warnings") and warning_risks.get("blocking_count") == 0,
+        "actual_model_usage_detects_mismatch": actual_route.get("actual_model") == "glm-5.2" and actual_route.get("actual_total_tokens") == 125 and actual_route.get("route_mismatch"),
         "utf8_json_roundtrip": json_roundtrip.get("prompt") == "中文✅�" and "中文项目" in str(json_roundtrip.get("path")),
         "change_split_source_vs_artifact": change_split["project_source_changes"]["changed_count"] == 1 and change_split["agent_artifact_changes"]["changed_count"] == 1,
         "run_id_validation": run_id_rejected,

@@ -2,6 +2,21 @@
 
 这里记录 Claude Code Orchestrator Skill 的主要版本变化。
 
+## v0.6.2 - 实际模型归因
+
+- 修复 #15：把 Claude stream 里的 `modelUsage` 保存为 `actual_model_usage`。
+- run status 和 metadata 新增 `actual_model`、`actual_cost_usd`、`actual_total_tokens`、`route_mismatch`。
+- `detect_failure_modes` 会把路由不一致标成高风险。
+- `usage-summary`、dashboard、控制报告都会区分声明路由模型和实际计费模型。
+
+## v0.6.1 - issue 审核补丁
+
+- `controller-report` / `pressure-report` Markdown 补齐按模型统计、总耗时、token 估算、输出字节、事件字节、预算停止次数、warning/blocking 计数和最高风险等级。
+- 每个 run 的报告行新增耗时、token 估算、stdout/events 字节、warning/blocking 计数、预算状态、源码/产物变化数量。
+- dashboard 输出预算区域新增 token 估算。
+- `usage-summary` 和按模型统计新增 warning/blocking 风险计数。
+- 旧 metadata 写入路径统一走 UTF-8/控制字符清洗。
+
 ## v0.6.0 - 总控运维加固
 
 - 修复 GitHub issues #3-#12。

@@ -2,6 +2,21 @@
 
 This page tracks the public docs-facing history of Claude Code Orchestrator Skill.
 
+## v0.6.2 - Actual model attribution
+
+- Fixed #15 by recording Claude stream `modelUsage` as `actual_model_usage`.
+- Added `actual_model`, `actual_cost_usd`, `actual_total_tokens`, and `route_mismatch` to run status and metadata.
+- `detect_failure_modes` now flags route mismatches as high-severity controller risks.
+- `usage-summary`, dashboard, and controller reports now distinguish declared route from actual billed model.
+
+## v0.6.1 - Issue audit completion
+
+- Expanded `controller-report` / `pressure-report` Markdown with by-model usage totals, total duration, token estimates, output bytes, event bytes, budget stops, warning counts, blocking counts, and max severity.
+- Added richer per-run report rows: duration, token estimate, stdout/events bytes, warning/blocking counts, budget state, and source/artifact counts.
+- Added token estimates to the dashboard output-budget panel.
+- Added warning/blocking risk counts to `usage-summary` and its by-model breakdown.
+- Routed remaining legacy metadata writes through the shared UTF-8/control-character sanitizer.
+
 ## v0.6.0 - Controller operations hardening
 
 - Fixed GitHub issues #3-#12.
