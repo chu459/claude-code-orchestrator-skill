@@ -21,6 +21,14 @@ Default routing:
 
 The orchestrator reads CCSwitch profiles in read-only mode and injects provider env vars only into the launched Claude Code process. It should not rewrite CCSwitch global state.
 
+## Reference Files
+
+When deciding how to supervise Claude Code workers, read `references/codex-controller-playbook.md`.
+
+When assigning repeatable worker tasks, read `references/prompt-pack/README.md`, then open only the needed prompt template.
+
+The runtime role configuration still lives in `scripts/cc-orchestrator/config/agents.json`. The prompt pack is controller guidance, not the only routing source.
+
 ## Worker Roles
 
 Supported primary roles:
@@ -113,7 +121,9 @@ python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" run-streaming "TASK" --rol
 Poll a streaming run:
 
 ```powershell
-python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" poll-run --run-id RUN_ID
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" poll-run --run-id RUN_ID --mode controller
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" summarize-run --run-id RUN_ID
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" compact-events --run-id RUN_ID
 ```
 
 List active streaming workers:
@@ -145,21 +155,34 @@ Preflight writes and inspect risk:
 
 ```powershell
 python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" preflight-write-scope --cwd PROJECT_PATH --allow src --deny .env --max-diff-lines 800
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" check-write-scope --cwd PROJECT_PATH
 python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" diff-summary --cwd PROJECT_PATH
 python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" secret-scan-run --run-id RUN_ID
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" verify-run --run-id RUN_ID --test-command "pytest"
 ```
 
 Benchmark, calibrate, and guard cost:
 
 ```powershell
 python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" benchmark-model --profile PROFILE --execute
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" benchmark-suite --profile PROFILE
 python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" calibrate-policy --preference coding=glm-5 --preference multimodal=qwen3.7-plus
 python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" cost-guard --max-concurrent 4 --max-timeout-seconds 1200 --apply
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" usage-summary --write-report
 ```
 
 Generate operator artifacts:
 
 ```powershell
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" queue-submit "TASK" --role review --priority 100
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" queue-tick --max-concurrent 3
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" queue-status
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" model-registry --refresh
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" local-policy --show
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" score-worker --run-id RUN_ID
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" render-prompt --template bugfix --task "TASK"
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" upgrade-check --apply
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" mock-stream-test
 python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" dashboard
 python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" open-run-folder --run-id RUN_ID
 python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" export-report --run-id RUN_ID
@@ -195,10 +218,12 @@ python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" diff --cwd "PROJECT_PATH"
 - Use `--allow-write` only for scoped implementation tasks after Codex has identified the write set.
 - Never print or persist raw API keys. The orchestrator redacts secrets, but still avoid requesting secrets in prompts.
 - After any write-enabled Claude Code run, inspect diffs and run verification before reporting success.
+- After any write-enabled run, call `check-write-scope` or `verify-run`. If `write_scope.status=blocked`, do not accept the run; inspect the rollback recommendation.
 - If the user wants to watch Claude Code work, use `run-visible`.
 - Windows Chinese output is handled with UTF-8 stdio and child-process UTF-8 env. If a host still renders text strangely, rely on the UTF-8 files under `runs/<run_id>/`.
 - Timeout output is preserved when the subprocess exposes partial stdout/stderr; use `last-run` to recover the tails.
 - For live control, prefer `run-streaming`: it uses Claude Code `stream-json`, writes `events.ndjson`, and enables `poll-run`, `run-status`, and `stop-run`.
+- For controller polling, prefer `poll-run --mode controller`. Raw `events.ndjson` stays on disk; Codex should usually read compact controller artifacts first.
 - When Claude Code needs a stable persona, project rules, or role-specific worker behavior, write `CLAUDE.md` first with `write-claude-md` or MCP tool `cc_write_claude_md`, then run the sub-agent from that project cwd.
 
 ## Four-Phase Workflow
@@ -224,7 +249,9 @@ Use the same role names through MCP:
 
 - `cc_pick_profile`, `cc_run_agent`, `cc_run_streaming_agent`, `cc_run_visible_agent`, and `cc_write_claude_md` accept `role`.
 - `cc_run_streaming_agent` starts a background Claude Code worker and writes `events.ndjson`.
-- `cc_poll_run` reads current status, event deltas, stdout/stderr deltas, tool calls, phase, and elapsed time.
+- `cc_poll_run` defaults to controller mode: status, compact progress, risk flags, changed files, timeline, and attention signals. Use raw mode only when debugging.
+- `cc_compact_events` writes `progress_summary.json`, `latest_decision.md`, `risk_flags.json`, `changed_files.json`, and `tool_timeline.md`.
+- `cc_summarize_run` returns the latest controller summary for one run.
 - `cc_stop_run` terminates a specific run id.
 - `cc_run_status` lists active workers or returns one run's status.
 - `cc_send_instruction` stops and restarts a non-interactive run with recovered context and a new instruction.
@@ -232,12 +259,23 @@ Use the same role names through MCP:
 - `cc_collect_team_results` summarizes team outputs and marks repeated agreements plus explicit conflicts/risks.
 - `cc_cross_review` launches second-round reviewer workers over previous outputs.
 - `cc_preflight_write_scope` writes allowed/denied paths and max diff rules before write-enabled work.
+- `cc_check_write_scope` checks whether run output crossed the write-scope boundaries and blocks acceptance on violations.
 - `cc_diff_summary` summarizes changed files, line counts, risk markers, and test need.
 - `cc_secret_scan_run` scans run logs/events/diff for leaked credentials.
 - `cc_rollback_run` conservatively rolls back when a clean pre-run git snapshot proves it is safe.
+- `cc_verify_run` runs diff summary, write-scope check, secret scan, optional tests, and writes a report.
 - `cc_benchmark_model` can run a small real benchmark task when `execute=true`.
+- `cc_benchmark_suite` can run or plan fixed code/review/security/context/multimodal benchmark tasks.
+- `cc_model_registry` refreshes the local model capability database from CCSwitch, benchmark history, and worker quality history.
 - `cc_calibrate_policy` persists local model preference notes.
+- `cc_local_policy` reads or writes user-owned local routing overrides that upgrades must preserve.
+- `cc_score_worker` grades one worker run and records model quality history.
+- `cc_prompt_pack` lists or renders reusable worker prompt templates.
 - `cc_cost_guard` stores max concurrency and timeout guardrails.
+- `cc_usage_summary` estimates daily tokens, duration, failures, and per-model usage from logs.
+- `cc_queue_submit`, `cc_queue_tick`, `cc_queue_status`, and `cc_queue_cancel` provide priority queue scheduling with concurrency and retry metadata.
+- `cc_upgrade_check` records version state while preserving local calibration/cost files.
+- `cc_mock_stream_test` uses a fake Claude stream to validate `events.ndjson`, polling, status, and stop without spending model quota.
 - `cc_dashboard` generates a local HTML worker dashboard.
 - `cc_open_run_folder` opens or returns a run log directory.
 - `cc_export_report` writes a Markdown report for a run or team.

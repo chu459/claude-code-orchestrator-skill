@@ -21,11 +21,34 @@ if (Test-Path -LiteralPath $target) {
 }
 
 New-Item -ItemType Directory -Force -Path $target | Out-Null
-robocopy $repoRoot $target /E /XD .git runs reports __pycache__ /XF *.pyc | Out-Null
+robocopy $repoRoot $target /E /XD .git runs reports dashboard node_modules __pycache__ /XF *.pyc model_calibration.json model_registry.json model_benchmark_history.json local_policy.override.json worker_quality_history.json cost_guard.json queue_policy.json version_state.json queue.json | Out-Null
 if ($LASTEXITCODE -gt 7) {
     throw "robocopy failed with exit code $LASTEXITCODE"
 }
 $global:LASTEXITCODE = 0
+
+$preserveRelative = @(
+    "scripts\cc-orchestrator\config\model_calibration.json",
+    "scripts\cc-orchestrator\config\model_registry.json",
+    "scripts\cc-orchestrator\config\model_benchmark_history.json",
+    "scripts\cc-orchestrator\config\local_policy.override.json",
+    "scripts\cc-orchestrator\config\worker_quality_history.json",
+    "scripts\cc-orchestrator\config\cost_guard.json",
+    "scripts\cc-orchestrator\config\queue_policy.json",
+    "scripts\cc-orchestrator\config\version_state.json"
+)
+
+if (Test-Path -LiteralPath $backup) {
+    foreach ($relative in $preserveRelative) {
+        $source = Join-Path $backup $relative
+        $destination = Join-Path $target $relative
+        if (Test-Path -LiteralPath $source) {
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
+            Copy-Item -LiteralPath $source -Destination $destination -Force
+            Write-Host "Preserved local config: $relative"
+        }
+    }
+}
 
 $toolHome = Join-Path $target "scripts\cc-orchestrator"
 
@@ -37,5 +60,7 @@ Write-Host "Run:"
 Write-Host "  `$env:CC_ORCHESTRATOR_HOME = `"$toolHome`""
 Write-Host "  python `"`$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py`" selftest"
 Write-Host "  python `"`$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py`" healthcheck"
+Write-Host "  python `"`$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py`" upgrade-check --apply"
 Write-Host ""
-Write-Host "For Codex MCP, add the config from docs/mcp.codex.example.toml to your Codex config.toml."
+Write-Host "For Codex/Claude MCP auto-registration, run:"
+Write-Host "  powershell -ExecutionPolicy Bypass -File `"$target\install\install-mcp.ps1`""

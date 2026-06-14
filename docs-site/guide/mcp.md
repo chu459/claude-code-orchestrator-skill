@@ -19,6 +19,12 @@ PYTHONIOENCODING = "utf-8"
 PYTHONUTF8 = "1"
 ```
 
+On Windows, the safe installer can write Codex and Claude MCP config after making backups:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install\install-mcp.ps1
+```
+
 The same example lives in:
 
 ```text
@@ -33,6 +39,41 @@ docs/mcp.codex.example.toml
 | `cc_list_profiles` | Lists CCSwitch profiles with secrets redacted |
 | `cc_pick_profile` | Shows which profile and model a role would use |
 | `cc_run_agent` | Runs one Claude Code worker |
+| `cc_run_streaming_agent` | Starts a background worker with live `events.ndjson` |
+| `cc_poll_run` | Polls compact controller progress by default |
+| `cc_summarize_run` | Writes and returns controller artifacts |
+| `cc_compact_events` | Compacts raw events into a small timeline |
+| `cc_run_status` | Lists active workers or inspects one run |
+| `cc_stop_run` | Stops one worker by run id |
+| `cc_send_instruction` | Restarts a run with recovered context and a new instruction |
+| `cc_spawn_role_team` | Starts several role workers |
+| `cc_collect_team_results` | Summarizes team output |
+| `cc_cross_review` | Starts second-round reviewer workers |
+| `cc_preflight_write_scope` | Writes allowed/denied path rules |
+| `cc_check_write_scope` | Blocks acceptance when writes cross the scope |
+| `cc_diff_summary` | Summarizes changed files and risk |
+| `cc_secret_scan_run` | Scans run logs and diff for secrets |
+| `cc_verify_run` | Runs diff, scope, secret scan, tests, and report |
+| `cc_rollback_run` | Conservatively rolls back a safe run diff |
+| `cc_benchmark_model` | Plans or runs one benchmark task |
+| `cc_benchmark_suite` | Plans or runs fixed benchmark tasks |
+| `cc_calibrate_policy` | Saves local model preference notes |
+| `cc_model_registry` | Builds the local model capability database |
+| `cc_local_policy` | Reads or writes user-owned routing overrides |
+| `cc_score_worker` | Grades a worker run and updates quality history |
+| `cc_prompt_pack` | Lists or renders reusable worker prompts |
+| `cc_cost_guard` | Sets concurrency and timeout guardrails |
+| `cc_usage_summary` | Estimates daily usage from logs |
+| `cc_queue_submit` | Submits a queued worker job |
+| `cc_queue_tick` | Starts queued jobs up to a limit |
+| `cc_queue_status` | Reads queue state |
+| `cc_queue_cancel` | Cancels a queue job |
+| `cc_queue_policy` | Reads or writes queue concurrency, retry, and timeout policy |
+| `cc_upgrade_check` | Preserves local preferences across upgrades |
+| `cc_mock_stream_test` | Tests streaming without spending model quota |
+| `cc_dashboard` | Generates a local HTML dashboard |
+| `cc_open_run_folder` | Opens a run folder |
+| `cc_export_report` | Exports a run or team report |
 | `cc_run_visible_agent` | Opens a visible Claude Code worker window |
 | `cc_last_run` | Reads the latest run metadata and output tails |
 | `cc_git_diff` | Returns a capped git diff for review |

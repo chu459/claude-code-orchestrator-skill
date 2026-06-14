@@ -1,0 +1,12 @@
+{
+  "updated_at": null,
+  "preferred_models": {
+    "development": "GLM5.2",
+    "implementation": "GLM5.2",
+    "review": "GLM5.2",
+    "security": "GLM5.2",
+    "multimodal": "qwen3.7-plus"
+  },
+  "preferred_profiles": {},
+  "notes": "Copy this file to local_policy.override.json and adjust names to match your CCSwitch profiles. The real override file is ignored by git and preserved across upgrades."
+}

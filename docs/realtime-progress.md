@@ -58,16 +58,16 @@ claude -p --output-format stream-json --verbose --include-partial-messages
 python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" poll-run --run-id <run_id>
 ```
 
-`poll-run` returns:
+`poll-run` defaults to controller mode and returns:
 
 - current status
 - active/alive flags
 - elapsed time
-- stdout/stderr deltas
-- event deltas
-- latest phase
-- recent tool calls
-- output tails
+- compact progress summary
+- risk flags
+- changed files
+- timeline
+- next offsets
 
 For cursor-style polling, pass the returned offsets:
 
@@ -78,6 +78,27 @@ python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" poll-run `
   --stderr-offset 0 `
   --event-offset 3400
 ```
+
+Use raw mode only when debugging:
+
+```powershell
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" poll-run --run-id <run_id> --mode raw
+```
+
+To write the controller artifacts explicitly:
+
+```powershell
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" summarize-run --run-id <run_id>
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" compact-events --run-id <run_id> --write-artifacts
+```
+
+This writes:
+
+- `progress_summary.json`
+- `latest_decision.md`
+- `risk_flags.json`
+- `changed_files.json`
+- `tool_timeline.md`
 
 ## List Active Workers
 
@@ -103,6 +124,41 @@ python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" stop-run --run-id <run_id>
 
 On Windows, the orchestrator uses `taskkill /PID <pid> /T` and adds `/F` when force is requested.
 
+## Test Without Spending Model Quota
+
+Use the fake stream test:
+
+```powershell
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" mock-stream-test
+```
+
+It launches a mock Claude command and verifies:
+
+- `events.ndjson` is written
+- `poll-run --mode raw` returns event deltas
+- `poll-run` returns compact controller progress
+- `run-status` sees an active worker
+- `stop-run` can terminate a long mock stream
+
+## Verify After Writes
+
+For write-capable runs, use:
+
+```powershell
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" verify-run --run-id <run_id> --test-command "pytest"
+```
+
+`verify-run` chains:
+
+- diff summary
+- write-scope check
+- secret scan
+- optional test commands
+- Markdown report
+- worker quality score
+
+If write scope is blocked, Codex should not accept the worker output.
+
 ## MCP Tools
 
 The same P0 loop is available through MCP:
@@ -112,6 +168,8 @@ cc_run_streaming_agent
 cc_poll_run
 cc_run_status
 cc_stop_run
+cc_mock_stream_test
+cc_verify_run
 ```
 
 ## Why This Matters

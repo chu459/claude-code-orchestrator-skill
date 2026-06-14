@@ -15,6 +15,7 @@
 <p align="center">
   <a href="README.zh-CN.md"><img alt="README: 中文" src="https://img.shields.io/badge/README-中文-red"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-brightgreen"></a>
+  <img alt="Version" src="https://img.shields.io/badge/version-v0.4.0-black">
   <img alt="Codex Skill" src="https://img.shields.io/badge/Codex-Skill-0A0A0A">
   <img alt="MCP Included" src="https://img.shields.io/badge/MCP-Included-blue">
   <img alt="CCSwitch" src="https://img.shields.io/badge/CCSwitch-Model_Router-purple">
@@ -25,6 +26,19 @@
 </p>
 
 ---
+
+<h2 align="center">Latest Updates</h2>
+
+<p align="center">
+  <b>Current version: v0.4.0</b>
+</p>
+
+| Version | What changed | Why it matters |
+| --- | --- | --- |
+| `v0.4.0` | Added the Codex Controller Playbook, Prompt Pack, compact controller-mode polling, `cc_summarize_run`, `cc_compact_events`, one-click verification scoring, real queue policy, model registry, local override preservation, worker quality history, failure-mode detection, and timeline dashboard. | Codex can now manage Claude Code workers like a real controller: watch compact progress, stop bad runs, verify changes, learn which model is best, and preserve local preferences across upgrades. |
+| `v0.3.0` | Added `cc_verify_run`, hard write-scope checks, mock streaming E2E tests, queue scheduling, usage summaries, upgrade checks, MCP auto-registration, and benchmark suite. | Turns the project from “can run workers” into a safer control console with verification, migration, and low-cost testing. |
+| `v0.2.x` | Added live streaming control: `run-streaming`, `poll-run`, `stop-run`, `run-status`, team spawning, cross review, dashboard, reports, and cost guard. | Codex can watch and manage Claude Code workers in real time instead of waiting blindly. |
+| `v0.1.x` | Built the first Skill + MCP + CLI foundation with CCSwitch profile discovery, model scoring, role routing, `CLAUDE.md` generation, visible Claude Code windows, logs, and safe defaults. | Proved the core idea: Codex is the brain, Claude Code is the worker layer, CCSwitch is the local model router. |
 
 <h2 align="center">Plain-English Pitch</h2>
 
@@ -139,6 +153,12 @@ PYTHONIOENCODING = "utf-8"
 PYTHONUTF8 = "1"
 ```
 
+Or let the safe installer write Codex/Claude MCP config after backing up existing files:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install\install-mcp.ps1
+```
+
 <h2 align="center">Quick Check</h2>
 
 ```bash
@@ -212,16 +232,30 @@ Safety and acceptance helpers:
 
 ```bash
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" preflight-write-scope --cwd /path/to/project --allow src --deny .env --max-diff-lines 800
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" check-write-scope --cwd /path/to/project
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" diff-summary --cwd /path/to/project
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" secret-scan-run --run-id <run_id>
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" verify-run --run-id <run_id> --test-command "npm test"
 ```
 
 Scheduling and reporting:
 
 ```bash
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" benchmark-model --profile PROFILE --execute
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" benchmark-suite --profile PROFILE
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" calibrate-policy --preference coding=glm-5 --preference multimodal=qwen3.7-plus
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" cost-guard --max-concurrent 4 --max-timeout-seconds 1200 --apply
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" usage-summary --write-report
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" queue-submit "Review this repo" --role review --priority 100
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" queue-tick --max-concurrent 3
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" queue-policy --max-concurrent 3 --default-timeout-seconds 900 --apply
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" model-registry --refresh --apply
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" local-policy --preference development=GLM5.2 --preference multimodal=qwen3.7-plus --apply
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" score-worker --run-id <run_id>
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" summarize-run --run-id <run_id>
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" render-prompt --template bugfix --task "Fix the bug"
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" upgrade-check --apply
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" mock-stream-test
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" dashboard
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" export-report --run-id <run_id>
 ```
@@ -247,7 +281,9 @@ python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" last-run
 | `cc_pick_profile` | Pick a profile/model for a role |
 | `cc_run_agent` | Run a Claude Code worker |
 | `cc_run_streaming_agent` | Start a background Claude Code worker with `stream-json` events |
-| `cc_poll_run` | Poll one run for status, output deltas, tool calls, phase, and elapsed time |
+| `cc_poll_run` | Poll one run in compact controller mode by default; raw deltas are still available |
+| `cc_summarize_run` | Write and return controller artifacts for a run |
+| `cc_compact_events` | Compact raw `events.ndjson` into a small timeline |
 | `cc_stop_run` | Stop a specific running Claude Code worker |
 | `cc_run_status` | List active Claude Code workers or inspect one run |
 | `cc_send_instruction` | Stop and restart a run with recovered context and a new instruction |
@@ -255,12 +291,27 @@ python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" last-run
 | `cc_collect_team_results` | Summarize team output and mark agreements/conflicts |
 | `cc_cross_review` | Launch second-round reviewer workers |
 | `cc_preflight_write_scope` | Fix allowed paths, denied paths, and max diff before writes |
+| `cc_check_write_scope` | Block acceptance when a run changed files outside the write scope |
 | `cc_diff_summary` | Summarize changed files, risks, and test need |
 | `cc_secret_scan_run` | Scan run logs/events/diff for leaked secrets |
 | `cc_rollback_run` | Conservative rollback when git snapshots prove it is safe |
+| `cc_verify_run` | Run diff summary, scope check, secret scan, tests, and report |
 | `cc_benchmark_model` | Run or plan a small model benchmark |
+| `cc_benchmark_suite` | Run or plan fixed code/review/security/context/multimodal benchmarks |
+| `cc_model_registry` | Build the local model capability database |
 | `cc_calibrate_policy` | Persist local model preference notes |
+| `cc_local_policy` | Read or write user-owned routing overrides preserved across upgrades |
+| `cc_score_worker` | Grade one worker run and update quality history |
+| `cc_prompt_pack` | List or render reusable worker prompts |
 | `cc_cost_guard` | Configure max concurrency and timeout guardrails |
+| `cc_usage_summary` | Estimate daily tokens, duration, failures, and model usage |
+| `cc_queue_submit` | Submit a priority worker job |
+| `cc_queue_tick` | Start queued jobs up to the concurrency limit |
+| `cc_queue_status` | Inspect pending/running/finished queue jobs |
+| `cc_queue_cancel` | Cancel a queued or running job |
+| `cc_queue_policy` | Read or write queue concurrency, retry, and timeout policy |
+| `cc_upgrade_check` | Preserve local model preferences across upgrades |
+| `cc_mock_stream_test` | Test streaming/poll/stop/status with a fake Claude stream |
 | `cc_dashboard` | Generate a local HTML worker dashboard |
 | `cc_open_run_folder` | Open or return a run log folder |
 | `cc_export_report` | Export a run or team Markdown report |
@@ -312,6 +363,25 @@ Recommended flow:
 3. Codex launches Claude Code through this Skill
 4. Claude Code follows the project persona and role rules
 5. Codex reviews logs, diffs, and final output
+```
+
+<h2 align="center">Daily Update Monitor</h2>
+
+You can ask Codex to create a daily automation that checks `chu459/claude-code-orchestrator-skill` for new commits.
+
+Recommended behavior:
+
+- report the latest GitHub commit
+- report local `HEAD`
+- report installed Skill version
+- summarize changes
+- never pull or overwrite automatically
+- only apply updates when `auto_apply` is explicitly enabled
+
+Suggested prompt:
+
+```text
+Create a daily Codex automation that checks whether chu459/claude-code-orchestrator-skill has new commits. Report remote commit, local HEAD, installed Skill version, uncommitted changes, and a short summary. Do not pull or apply updates unless auto_apply is explicitly enabled.
 ```
 
 <h2 align="center">Multi-Agent Roles</h2>
@@ -379,7 +449,7 @@ What works today:
 
 1. use `run-streaming` to start Claude Code with `--output-format stream-json --include-partial-messages`
 2. read live events from `events.ndjson`
-3. use `poll-run` to inspect one run's status, stdout/stderr deltas, latest phase, and tool calls
+3. use `poll-run` to inspect compact controller progress, risk flags, changed files, and timeline
 4. use `run-status` to list active workers
 5. use `stop-run` to terminate a runaway worker
 6. use `run-visible` when the user wants a real terminal window
@@ -402,7 +472,8 @@ The P0 live-control loop is:
 
 ```text
 cc_run_streaming_agent -> events.ndjson
-cc_poll_run -> latest output, tool calls, phase, elapsed time
+cc_poll_run -> compact controller progress, risk flags, changed files, timeline
+cc_summarize_run -> write controller artifacts
 cc_run_status -> active worker list
 cc_stop_run -> kill a stuck or expensive worker
 ```
@@ -442,10 +513,28 @@ It is about bringing model cost, context cost, worker cost, and human attention 
 - [x] Preflight write-scope file
 - [x] Diff summary and secret scan helpers
 - [x] Conservative rollback helper
+- [x] Automatic `verify-run` acceptance pipeline
+- [x] Mock streaming E2E test
+- [x] Hard write-scope enforcement after runs
+- [x] Queue scheduling with priority, concurrency, timeout, and retry metadata
+- [x] Daily usage summary from logs
+- [x] Version and upgrade-state mechanism
+- [x] MCP auto-registration installer for Windows
+- [x] Fixed benchmark suite entrypoint
 - [x] Model benchmark/calibration entrypoints
 - [x] Cost guard policy
 - [x] Local HTML dashboard
-- [ ] Web dashboard
+- [x] Codex Controller Playbook
+- [x] Prompt Pack
+- [x] Compact controller-mode polling
+- [x] Run timeline visualization
+- [x] Model registry and benchmark history
+- [x] Local policy override preserved across upgrades
+- [x] Worker quality scoring
+- [x] Failure-mode detection
+- [x] Queue policy with priority, retry, timeout, and max concurrency
+- [x] Daily update monitor automation
+- [x] Web-style local dashboard
 - [ ] Agent result voting
 
 <h2 align="center">License</h2>

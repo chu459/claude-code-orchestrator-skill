@@ -14,12 +14,17 @@ from pydantic import BaseModel, ConfigDict, Field
 from cc_orchestrator import (
     ROLE_ORDER,
     OrchestratorError,
+    build_model_registry,
+    benchmark_suite,
     benchmark_model,
     calibrate_policy,
+    check_write_scope,
     collect_team_results,
+    compact_events,
     cost_guard,
     cross_review,
     dashboard,
+    daily_usage_summary,
     diff_summary,
     export_report,
     healthcheck,
@@ -32,6 +37,11 @@ from cc_orchestrator import (
     get_provider,
     poll_run,
     preflight_write_scope,
+    queue_cancel,
+    queue_policy,
+    queue_status,
+    queue_submit,
+    queue_tick,
     rollback_run,
     run_agent,
     run_status,
@@ -40,8 +50,16 @@ from cc_orchestrator import (
     run_workflow_plan,
     secret_scan_run,
     send_instruction,
+    local_policy_override,
+    list_prompt_pack,
+    render_prompt_template,
+    score_worker,
     spawn_role_team,
     stop_run,
+    summarize_run,
+    mock_stream_test,
+    upgrade_check,
+    verify_run,
     write_claude_md,
     write_reports,
 )
@@ -104,6 +122,31 @@ class PollRunInput(BaseModel):
     max_bytes: int = Field(default=20000, ge=1000, le=200000, description="Maximum bytes to read from each stream.")
     include_output_tail: bool = Field(default=True, description="Include stdout/stderr tails in the status block.")
     tail_chars: int = Field(default=4000, ge=0, le=20000, description="Tail characters for status output.")
+    mode: str = Field(default="controller", pattern="^(controller|raw)$", description="controller returns compact Codex progress; raw returns stdout/stderr/event deltas.")
+    max_events: int = Field(default=20, ge=1, le=200, description="Maximum compact events returned in controller mode.")
+    max_summary_chars: int = Field(default=2000, ge=200, le=20000, description="Budget for compact text fields.")
+    write_artifacts: bool = Field(default=False, description="Write controller artifact files while polling.")
+
+
+class SummarizeRunInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    run_id: str
+    event_offset: int = Field(default=0, ge=0)
+    max_bytes: int = Field(default=20000, ge=1000, le=200000)
+    max_events: int = Field(default=20, ge=1, le=200)
+    max_summary_chars: int = Field(default=2000, ge=200, le=20000)
+    write_artifacts: bool = True
+
+
+class CompactEventsInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    run_id: str
+    event_offset: int = Field(default=0, ge=0)
+    max_bytes: int = Field(default=20000, ge=1000, le=200000)
+    max_events: int = Field(default=20, ge=1, le=200)
+    write_artifacts: bool = False
 
 
 class StopRunInput(BaseModel):
@@ -192,6 +235,22 @@ class RollbackRunInput(BaseModel):
     confirm: bool = Field(default=False, description="Required for applying a reverse patch.")
 
 
+class CheckWriteScopeInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    run_id: Optional[str] = None
+    cwd: Optional[str] = None
+
+
+class VerifyRunInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    run_id: str
+    test_commands: list[str] = Field(default_factory=list, description="Optional shell commands to run after diff/scope/secret checks.")
+    test_timeout_seconds: int = Field(default=300, ge=5, le=3600)
+    include_diff: bool = True
+
+
 class BenchmarkModelInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
@@ -200,6 +259,14 @@ class BenchmarkModelInput(BaseModel):
     task: str = Field(default="Return a concise JSON object with keys ok and summary.", max_length=20000)
     timeout_seconds: int = Field(default=120, ge=10, le=1800)
     execute: bool = Field(default=False, description="When false, returns the planned benchmark without spending model calls.")
+
+
+class BenchmarkSuiteInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    profile: Optional[str] = None
+    timeout_seconds: int = Field(default=120, ge=10, le=1800)
+    execute: bool = Field(default=False, description="When false, returns the planned suite without spending model calls.")
 
 
 class CalibratePolicyInput(BaseModel):
@@ -214,6 +281,96 @@ class CostGuardInput(BaseModel):
 
     config: dict = Field(default_factory=dict)
     apply: bool = False
+
+
+class ModelRegistryInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    refresh: bool = True
+    apply: bool = False
+
+
+class LocalPolicyInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    config: dict = Field(default_factory=dict)
+    apply: bool = False
+
+
+class ScoreWorkerInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    run_id: str
+    solved: Optional[bool] = None
+    hallucination: Optional[bool] = None
+    needs_rework: Optional[bool] = None
+    notes: Optional[str] = Field(default=None, max_length=4000)
+    apply: bool = True
+
+
+class PromptPackInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    template: Optional[str] = Field(default=None, description="Template name to render. Omit to list templates.")
+    task: str = Field(default="", max_length=20000)
+    variables: dict = Field(default_factory=dict)
+
+
+class UsageSummaryInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    date: Optional[str] = Field(default=None, description="UTC date YYYY-MM-DD. Defaults to today.")
+    write_report: bool = False
+
+
+class QueueSubmitInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    task: str = Field(..., min_length=1, max_length=20000)
+    role: str = Field(default="implementation", description=ROLE_DESCRIPTION)
+    priority: int = Field(default=100, ge=-1000, le=1000)
+    cwd: Optional[str] = None
+    context: Optional[str] = Field(default=None, max_length=20000)
+    timeout_seconds: Optional[int] = Field(default=None, ge=10, le=1800)
+    max_retries: int = Field(default=0, ge=0, le=5)
+    allow_write: bool = False
+
+
+class QueueTickInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    max_concurrent: Optional[int] = Field(default=None, ge=1, le=32)
+
+
+class QueueStatusInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    include_finished: bool = True
+
+
+class QueueCancelInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    job_id: str
+
+
+class QueuePolicyInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    config: dict = Field(default_factory=dict)
+    apply: bool = False
+
+
+class UpgradeCheckInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    apply: bool = False
+
+
+class MockStreamTestInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    timeout_seconds: int = Field(default=20, ge=5, le=120)
 
 
 class DashboardInput(BaseModel):
@@ -471,7 +628,7 @@ async def cc_run_streaming_agent(params: RunStreamingAgentInput) -> str:
     name="cc_poll_run",
     annotations={
         "title": "Poll Streaming Claude Code Run",
-        "readOnlyHint": True,
+        "readOnlyHint": False,
         "destructiveHint": False,
         "idempotentHint": True,
         "openWorldHint": False,
@@ -489,8 +646,30 @@ async def cc_poll_run(params: PollRunInput) -> str:
                 max_bytes=params.max_bytes,
                 include_output_tail=params.include_output_tail,
                 tail_chars=params.tail_chars,
+                mode=params.mode,
+                max_events=params.max_events,
+                max_summary_chars=params.max_summary_chars,
+                write_artifacts=params.write_artifacts,
             )
         )
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_summarize_run", annotations={"title": "Summarize Run For Controller", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
+async def cc_summarize_run(params: SummarizeRunInput) -> str:
+    """Write and return compact controller artifacts for one run."""
+    try:
+        return _json(summarize_run(run_id=params.run_id, event_offset=params.event_offset, max_bytes=params.max_bytes, max_events=params.max_events, max_summary_chars=params.max_summary_chars, write_artifacts=params.write_artifacts))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_compact_events", annotations={"title": "Compact Run Events", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
+async def cc_compact_events(params: CompactEventsInput) -> str:
+    """Return compact event/timeline data without dumping raw events."""
+    try:
+        return _json(compact_events(run_id=params.run_id, event_offset=params.event_offset, max_bytes=params.max_bytes, max_events=params.max_events, write_artifacts=params.write_artifacts))
     except Exception as exc:
         return _error(exc)
 
@@ -611,11 +790,38 @@ async def cc_rollback_run(params: RollbackRunInput) -> str:
         return _error(exc)
 
 
+@mcp.tool(name="cc_check_write_scope", annotations={"title": "Check Write Scope", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
+async def cc_check_write_scope(params: CheckWriteScopeInput) -> str:
+    """Check whether a run or current workspace changed files outside the preflight write scope."""
+    try:
+        return _json(check_write_scope(run_id=params.run_id, cwd=Path(params.cwd) if params.cwd else None))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_verify_run", annotations={"title": "Verify Claude Code Run", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False})
+async def cc_verify_run(params: VerifyRunInput) -> str:
+    """Run the automatic acceptance pipeline: diff summary, write-scope check, secret scan, optional tests, and report."""
+    try:
+        return _json(verify_run(params.run_id, test_commands=params.test_commands, test_timeout_seconds=params.test_timeout_seconds, include_diff=params.include_diff))
+    except Exception as exc:
+        return _error(exc)
+
+
 @mcp.tool(name="cc_benchmark_model", annotations={"title": "Benchmark CCSwitch Model", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True})
 async def cc_benchmark_model(params: BenchmarkModelInput) -> str:
     """Run or plan a small real benchmark through Claude Code for a selected profile/model."""
     try:
         return _json(benchmark_model(profile=params.profile, role=params.role, task=params.task, timeout_seconds=params.timeout_seconds, execute=params.execute))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_benchmark_suite", annotations={"title": "Benchmark CCSwitch Model Suite", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True})
+async def cc_benchmark_suite(params: BenchmarkSuiteInput) -> str:
+    """Run or plan the fixed benchmark suite for code fix, review, security, long context, and multimodal planning."""
+    try:
+        return _json(benchmark_suite(profile=params.profile, execute=params.execute, timeout_seconds=params.timeout_seconds))
     except Exception as exc:
         return _error(exc)
 
@@ -629,11 +835,121 @@ async def cc_calibrate_policy(params: CalibratePolicyInput) -> str:
         return _error(exc)
 
 
+@mcp.tool(name="cc_model_registry", annotations={"title": "Model Capability Registry", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
+async def cc_model_registry(params: ModelRegistryInput) -> str:
+    """Build or write the local model capability database from CCSwitch, benchmarks, and worker scores."""
+    try:
+        return _json(build_model_registry(refresh=params.refresh, apply=params.apply))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_local_policy", annotations={"title": "Local Policy Override", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False})
+async def cc_local_policy(params: LocalPolicyInput) -> str:
+    """Read or write user-owned local model routing overrides preserved across upgrades."""
+    try:
+        return _json(local_policy_override(params.config, apply=params.apply))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_score_worker", annotations={"title": "Score Worker Quality", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False})
+async def cc_score_worker(params: ScoreWorkerInput) -> str:
+    """Grade one Claude Code worker run and append quality history."""
+    try:
+        return _json(score_worker(params.run_id, solved=params.solved, hallucination=params.hallucination, needs_rework=params.needs_rework, notes=params.notes, apply=params.apply))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_prompt_pack", annotations={"title": "Prompt Pack", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
+async def cc_prompt_pack(params: PromptPackInput) -> str:
+    """List or render reusable worker prompt templates."""
+    try:
+        if params.template:
+            return _json(render_prompt_template(params.template, task=params.task, variables=params.variables))
+        return _json(list_prompt_pack())
+    except Exception as exc:
+        return _error(exc)
+
+
 @mcp.tool(name="cc_cost_guard", annotations={"title": "Configure Cost Guard", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False})
 async def cc_cost_guard(params: CostGuardInput) -> str:
     """Read or write concurrency and timeout guardrails for worker runs."""
     try:
         return _json(cost_guard(params.config, apply=params.apply))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_usage_summary", annotations={"title": "Daily Usage Summary", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
+async def cc_usage_summary(params: UsageSummaryInput) -> str:
+    """Estimate daily token usage, duration, failures, and model breakdown from saved run logs."""
+    try:
+        return _json(daily_usage_summary(date=params.date, write_report=params.write_report))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_queue_submit", annotations={"title": "Submit Queue Job", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True})
+async def cc_queue_submit(params: QueueSubmitInput) -> str:
+    """Submit a Claude Code worker job to the priority queue without starting it immediately."""
+    try:
+        return _json(queue_submit(task=params.task, role=params.role, priority=params.priority, cwd=Path(params.cwd) if params.cwd else None, context=params.context, timeout_seconds=params.timeout_seconds, max_retries=params.max_retries, allow_write=params.allow_write))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_queue_tick", annotations={"title": "Tick Queue Scheduler", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True})
+async def cc_queue_tick(params: QueueTickInput) -> str:
+    """Start pending queue jobs up to the configured concurrency limit."""
+    try:
+        return _json(queue_tick(max_concurrent=params.max_concurrent))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_queue_status", annotations={"title": "Queue Status", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
+async def cc_queue_status(params: QueueStatusInput) -> str:
+    """Return queued, running, and optionally finished queue jobs."""
+    try:
+        return _json(queue_status(include_finished=params.include_finished))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_queue_cancel", annotations={"title": "Cancel Queue Job", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False})
+async def cc_queue_cancel(params: QueueCancelInput) -> str:
+    """Cancel a queued job and stop its active run if it is already running."""
+    try:
+        return _json(queue_cancel(params.job_id))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_queue_policy", annotations={"title": "Queue Policy", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False})
+async def cc_queue_policy(params: QueuePolicyInput) -> str:
+    """Read or write queue defaults such as max_concurrent, retry, and timeout policy."""
+    try:
+        return _json(queue_policy(params.config, apply=params.apply))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_upgrade_check", annotations={"title": "Upgrade Check", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
+async def cc_upgrade_check(params: UpgradeCheckInput) -> str:
+    """Check or write version state while preserving local model calibration and cost guard files."""
+    try:
+        return _json(upgrade_check(apply=params.apply))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_mock_stream_test", annotations={"title": "Mock Streaming E2E Test", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False})
+async def cc_mock_stream_test(params: MockStreamTestInput) -> str:
+    """Run a fake Claude stream to test events.ndjson, poll, status, and stop without spending model quota."""
+    try:
+        return _json(mock_stream_test(timeout_seconds=params.timeout_seconds))
     except Exception as exc:
         return _error(exc)
 

@@ -2,6 +2,15 @@ runs/
 reports/
 dashboard/
 __pycache__/
+scripts/cc-orchestrator/config/model_calibration.json
+scripts/cc-orchestrator/config/model_registry.json
+scripts/cc-orchestrator/config/model_benchmark_history.json
+scripts/cc-orchestrator/config/local_policy.override.json
+scripts/cc-orchestrator/config/worker_quality_history.json
+scripts/cc-orchestrator/config/cost_guard.json
+scripts/cc-orchestrator/config/queue_policy.json
+scripts/cc-orchestrator/config/version_state.json
+scripts/cc-orchestrator/runs/queue.json
 *.pyc
 *.pyo
 *.pyd
@@ -16,6 +25,7 @@ Thumbs.db
 .mypy_cache/
 .venv/
 venv/
+node_modules/
 dist/
 build/
 *.egg-info/

@@ -24,6 +24,7 @@
   <a href="README.md"><img alt="Language: English" src="https://img.shields.io/badge/README-English-black"></a>
   <a href="README.md"><img alt="Default README: English" src="https://img.shields.io/badge/Default-English-blue"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-brightgreen"></a>
+  <img alt="Version" src="https://img.shields.io/badge/version-v0.4.0-black">
   <img alt="Codex Skill" src="https://img.shields.io/badge/Codex-Skill-0A0A0A">
   <img alt="MCP Included" src="https://img.shields.io/badge/MCP-Included-blue">
   <img alt="CCSwitch" src="https://img.shields.io/badge/CCSwitch-Model_Router-purple">
@@ -31,6 +32,18 @@
 
 ---
 
+<h2 align="center">更新日志</h2>
+
+<p align="center">
+  <b>当前版本：v0.4.0</b>
+</p>
+
+| 版本 | 更新内容 | 为什么重要 |
+| --- | --- | --- |
+| `v0.4.0` | 新增 Codex 总控手册、Prompt Pack、压缩版总控轮询、`cc_summarize_run`、`cc_compact_events`、一键验收评分、真正的队列策略、模型能力库、本机偏好保留、worker 质量历史、失败模式识别、时间线看板。 | Codex 不再只是等 worker 回来，而是能边看边管、发现跑偏就停、改完自动验收、持续学习哪个模型最适合哪类任务。 |
+| `v0.3.0` | 新增 `cc_verify_run`、写入范围硬检查、mock streaming 端到端测试、任务队列、每日用量统计、升级迁移、MCP 自动注册、benchmark suite。 | 从“能跑 worker”，升级成“能验收、能回滚建议、能迁移、能低成本测试”的控制台。 |
+| `v0.2.x` | 新增实时控制：`run-streaming`、`poll-run`、`stop-run`、`run-status`、角色团队、交叉审查、看板、报告、成本护栏。 | Codex 可以边看边管 Claude Code worker，不用盲等结果。 |
+| `v0.1.x` | 完成 Skill + MCP + CLI 基座：CCSwitch 发现、模型评分、角色路由、`CLAUDE.md` 生成、可视 Claude Code 窗口、日志和安全默认值。 | 证明核心思路：Codex 当大脑，Claude Code 当执行层，CCSwitch 当本地模型路由器。 |
 
 <h2 align="center">中文版</h2>
 
@@ -206,6 +219,12 @@ PYTHONIOENCODING = "utf-8"
 PYTHONUTF8 = "1"
 ```
 
+也可以直接用安全安装脚本写入 Codex / Claude MCP 配置。脚本会先备份旧配置：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install\install-mcp.ps1
+```
+
 同样的配置也在：
 
 ```text
@@ -294,16 +313,30 @@ python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" cross-review --run-id <run_id>
 
 ```bash
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" preflight-write-scope --cwd /path/to/project --allow src --deny .env --max-diff-lines 800
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" check-write-scope --cwd /path/to/project
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" diff-summary --cwd /path/to/project
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" secret-scan-run --run-id <run_id>
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" verify-run --run-id <run_id> --test-command "npm test"
 ```
 
 模型调度和报告：
 
 ```bash
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" benchmark-model --profile PROFILE --execute
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" benchmark-suite --profile PROFILE
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" calibrate-policy --preference coding=glm-5 --preference multimodal=qwen3.7-plus
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" cost-guard --max-concurrent 4 --max-timeout-seconds 1200 --apply
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" usage-summary --write-report
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" queue-submit "Review this repo" --role review --priority 100
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" queue-tick --max-concurrent 3
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" queue-policy --max-concurrent 3 --default-timeout-seconds 900 --apply
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" model-registry --refresh --apply
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" local-policy --preference development=GLM5.2 --preference multimodal=qwen3.7-plus --apply
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" score-worker --run-id <run_id>
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" summarize-run --run-id <run_id>
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" render-prompt --template bugfix --task "Fix the bug"
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" upgrade-check --apply
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" mock-stream-test
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" dashboard
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" export-report --run-id <run_id>
 ```
@@ -333,7 +366,9 @@ Codex 可以调用这些工具：
 | `cc_pick_profile` | 给某个角色选择模型 |
 | `cc_run_agent` | 跑一个 Claude Code 子 Agent |
 | `cc_run_streaming_agent` | 启动带 `stream-json` 事件的后台 Claude Code worker |
-| `cc_poll_run` | 查询某次 run 的状态、输出增量、工具调用、阶段和耗时 |
+| `cc_poll_run` | 默认查询压缩后的总控进度，也可切到 raw 模式看原始增量 |
+| `cc_summarize_run` | 写入并返回某次 run 的总控摘要文件 |
+| `cc_compact_events` | 把原始 `events.ndjson` 压缩成小时间线 |
 | `cc_stop_run` | 停止指定 run id 的 Claude Code worker |
 | `cc_run_status` | 列出正在运行的 workers，或查看某个 run |
 | `cc_send_instruction` | 通过“停止并带上下文重启”追加指令 |
@@ -341,12 +376,27 @@ Codex 可以调用这些工具：
 | `cc_collect_team_results` | 汇总团队输出，标出一致结论和冲突风险 |
 | `cc_cross_review` | 启动二轮交叉审查 worker |
 | `cc_preflight_write_scope` | 写代码前固定允许目录、禁止文件和最大 diff |
+| `cc_check_write_scope` | 检查 run 是否越过写入范围，越界就阻止验收 |
 | `cc_diff_summary` | 总结 diff 改了什么、风险在哪、是否需要测试 |
 | `cc_secret_scan_run` | 扫描 run 日志、事件和 diff，防止密钥泄漏 |
 | `cc_rollback_run` | 在 git 快照证明安全时保守回滚 |
+| `cc_verify_run` | 串起 diff、写入范围、密钥扫描、测试和报告 |
 | `cc_benchmark_model` | 运行或规划小任务模型实测 |
+| `cc_benchmark_suite` | 运行或规划代码修复、审查、安全、长上下文、多模态基准 |
+| `cc_model_registry` | 生成本机模型能力数据库 |
 | `cc_calibrate_policy` | 固化本机模型偏好 |
+| `cc_local_policy` | 读写本机路由偏好，升级时保留 |
+| `cc_score_worker` | 给某次 worker 运行打分并记录质量历史 |
+| `cc_prompt_pack` | 列出或渲染可复用 worker 提示词 |
 | `cc_cost_guard` | 配置最大并发和超时护栏 |
+| `cc_usage_summary` | 从日志估算每日 token、耗时、失败率和模型用量 |
+| `cc_queue_submit` | 提交一个优先级队列任务 |
+| `cc_queue_tick` | 按并发上限启动排队任务 |
+| `cc_queue_status` | 查看队列状态 |
+| `cc_queue_cancel` | 取消排队或运行中的任务 |
+| `cc_queue_policy` | 读写队列并发、重试和超时策略 |
+| `cc_upgrade_check` | 升级时保留本机模型偏好、模型库、质量历史、队列策略和成本配置 |
+| `cc_mock_stream_test` | 用 fake Claude 流测试 streaming、poll、stop、status |
 | `cc_dashboard` | 生成本地 HTML worker 面板 |
 | `cc_open_run_folder` | 打开或返回某次 run 日志目录 |
 | `cc_export_report` | 导出 run 或 team 的 Markdown 报告 |
@@ -400,6 +450,25 @@ cc_write_claude_md
 3. Codex 通过这个 Skill 启动 Claude Code
 4. Claude Code 按项目人设和角色规则执行
 5. Codex 审查日志、diff 和最终输出
+```
+
+<h2 align="center">每日更新检查</h2>
+
+你可以让 Codex 创建一个每日自动化，定时检查 `chu459/claude-code-orchestrator-skill` 有没有新 commit。
+
+推荐行为：
+
+- 汇报 GitHub 最新 commit
+- 汇报本地 `HEAD`
+- 汇报已安装 Skill 版本
+- 总结更新内容
+- 默认绝不自动拉取、安装、覆盖
+- 只有明确开启 `auto_apply` 才允许自动应用
+
+可直接对 Codex 说：
+
+```text
+创建一个每日 Codex 自动化，检查 chu459/claude-code-orchestrator-skill 是否有新 commit。汇报远端 commit、本地 HEAD、已安装 Skill 版本、未提交改动和简短摘要。不要 pull 或应用更新，除非 auto_apply 已明确开启。
 ```
 
 <h2 align="center">多 Agent 角色</h2>
@@ -473,7 +542,7 @@ flowchart TD
 当前可用方法：
 
 1. 用 `run-streaming` 启动后台 Claude Code worker。
-2. 用 `poll-run` 实时查看状态、输出增量、工具调用和阶段。
+2. 用 `poll-run` 实时查看压缩后的总控进度、风险、改动文件和时间线。
 3. 用 `run-status` 查看所有正在运行的 workers。
 4. 用 `stop-run` 停掉跑偏、卡住、成本异常的 worker。
 5. 用 `run-visible` 打开 Claude Code 窗口。
@@ -496,7 +565,8 @@ P0 实时掌控四件套已经可用：
 
 ```text
 cc_run_streaming_agent
-cc_poll_run
+cc_poll_run -> 压缩总控进度、风险、改动文件、时间线
+cc_summarize_run -> 写入总控摘要文件
 cc_stop_run
 cc_run_status
 ```
@@ -546,10 +616,28 @@ docs/realtime-progress.md
 - [x] Preflight write-scope file
 - [x] Diff summary and secret scan helpers
 - [x] Conservative rollback helper
+- [x] 自动验收流水线 `verify-run`
+- [x] mock streaming 端到端测试
+- [x] run 结束后的写入范围硬检查
+- [x] 带优先级、并发、超时、重试信息的任务队列
+- [x] 从日志生成每日用量估算
+- [x] version.json 和升级状态机制
+- [x] Windows MCP 自注册安装器
+- [x] 固定 benchmark suite 入口
 - [x] Model benchmark/calibration entrypoints
 - [x] Cost guard policy
 - [x] Local HTML dashboard
-- [ ] Web dashboard
+- [x] Codex Controller Playbook
+- [x] Prompt Pack
+- [x] Compact controller-mode polling
+- [x] Run timeline visualization
+- [x] Model registry and benchmark history
+- [x] Local policy override preserved across upgrades
+- [x] Worker quality scoring
+- [x] Failure-mode detection
+- [x] Queue policy with priority, retry, timeout, and max concurrency
+- [x] Daily update monitor automation
+- [x] Web-style local dashboard
 - [ ] Agent result voting
 
 <h2 align="center">免责声明</h2>

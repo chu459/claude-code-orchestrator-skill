@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import html as html_lib
 import json
 import os
 import re
@@ -52,15 +53,26 @@ configure_stdio()
 
 
 ROOT = Path(__file__).resolve().parent
+SKILL_ROOT = ROOT.parent.parent
 CONFIG_DIR = ROOT / "config"
 RUNS_DIR = ROOT / "runs"
 TEAMS_DIR = RUNS_DIR / "teams"
 REPORTS_DIR = ROOT / "reports"
 DASHBOARD_DIR = ROOT / "dashboard"
+REFERENCES_DIR = SKILL_ROOT / "references"
+PROMPT_PACK_DIR = REFERENCES_DIR / "prompt-pack"
+VERSION_PATH = SKILL_ROOT / "version.json"
 POLICY_PATH = CONFIG_DIR / "model_policy.json"
 AGENTS_PATH = CONFIG_DIR / "agents.json"
 CALIBRATION_PATH = CONFIG_DIR / "model_calibration.json"
 COST_GUARD_PATH = CONFIG_DIR / "cost_guard.json"
+VERSION_STATE_PATH = CONFIG_DIR / "version_state.json"
+MODEL_REGISTRY_PATH = CONFIG_DIR / "model_registry.json"
+MODEL_BENCHMARK_HISTORY_PATH = CONFIG_DIR / "model_benchmark_history.json"
+LOCAL_POLICY_OVERRIDE_PATH = CONFIG_DIR / "local_policy.override.json"
+WORKER_QUALITY_HISTORY_PATH = CONFIG_DIR / "worker_quality_history.json"
+QUEUE_POLICY_PATH = CONFIG_DIR / "queue_policy.json"
+QUEUE_PATH = RUNS_DIR / "queue.json"
 CLAUDE_MD_MARKER_BEGIN = "<!-- claude-code-orchestrator:begin -->"
 CLAUDE_MD_MARKER_END = "<!-- claude-code-orchestrator:end -->"
 SECRET_KEY_RE = re.compile(r"(key|token|secret|authorization|auth)", re.IGNORECASE)
@@ -78,9 +90,13 @@ SECRET_VALUE_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
+SECRET_ASSIGN_RE = re.compile(
+    r"(?i)(?:api[_-]?key|secret|token|authorization|auth)\s*[:=]\s*['\"]?([A-Za-z0-9._~+/=\-]{16,})"
+)
 ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 RUN_ID_RE = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{8}$")
 TEAM_ID_RE = re.compile(r"^team-\d{8}T\d{6}Z-[0-9a-f]{8}$")
+QUEUE_JOB_ID_RE = re.compile(r"^job-\d{8}T\d{6}Z-[0-9a-f]{8}$")
 PASSTHROUGH_ENV_KEYS = {
     "PATH",
     "Path",
@@ -98,6 +114,8 @@ PASSTHROUGH_ENV_KEYS = {
     "LOCALAPPDATA",
     "PROGRAMDATA",
     "CLAUDE_CODE_BIN",
+    "CC_ORCHESTRATOR_FAKE_STEPS",
+    "CC_ORCHESTRATOR_FAKE_DELAY",
     "LANG",
     "LC_ALL",
     "LC_CTYPE",
@@ -140,6 +158,19 @@ ROLE_SCORE_WEIGHTS: dict[str, dict[str, float]] = {
     "automation": {"tool_use": 0.25, "code": 0.25, "stability": 0.20, "reasoning": 0.15, "speed": 0.10, "cost": 0.05},
     "ops": {"stability": 0.25, "tool_use": 0.20, "speed": 0.20, "reasoning": 0.15, "long_context": 0.10, "cost": 0.10},
     "multimodal": {"multimodal": 0.40, "tool_use": 0.20, "reasoning": 0.15, "code": 0.10, "long_context": 0.10, "stability": 0.05},
+}
+CONTROLLER_ARTIFACTS = {
+    "progress_summary": "progress_summary.json",
+    "latest_decision": "latest_decision.md",
+    "risk_flags": "risk_flags.json",
+    "changed_files": "changed_files.json",
+    "tool_timeline": "tool_timeline.md",
+}
+FAILURE_PATTERNS = {
+    "test_failed": re.compile(r"\b(test|pytest|npm test|pnpm test|vitest|jest).{0,80}\b(fail|failed|error|exit code [1-9])\b", re.IGNORECASE),
+    "claimed_success": re.compile(r"\b(success|succeeded|done|completed|all tests pass|tests passed)\b", re.IGNORECASE),
+    "permission_risk": re.compile(r"\b(rm -rf|Remove-Item|del /s|format |chmod 777|sudo |Set-ExecutionPolicy)\b", re.IGNORECASE),
+    "repeated_search": re.compile(r"\b(rg|grep|findstr|Get-ChildItem|ls|dir)\b", re.IGNORECASE),
 }
 
 
@@ -362,6 +393,154 @@ def update_metadata(run_dir: Path, **updates: Any) -> dict[str, Any]:
     return metadata
 
 
+def run_git_command(cwd: Path, args: list[str], timeout: int = 30) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+    )
+
+
+def parse_porcelain_status(raw: str) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    parts = raw.split("\0")
+    idx = 0
+    while idx < len(parts):
+        entry = parts[idx]
+        idx += 1
+        if not entry:
+            continue
+        status = entry[:2]
+        path = entry[3:] if len(entry) > 3 else ""
+        old_path = ""
+        if status.strip() and status[0] in {"R", "C"} and idx < len(parts):
+            old_path = path
+            path = parts[idx]
+            idx += 1
+        if path:
+            item = {"status": status.strip() or "modified", "path": path.replace("\\", "/")}
+            if old_path:
+                item["old_path"] = old_path.replace("\\", "/")
+            items.append(item)
+    return items
+
+
+def status_paths(items: list[dict[str, str]]) -> list[str]:
+    paths: list[str] = []
+    for item in items:
+        for key in ("path", "old_path"):
+            value = item.get(key)
+            if value and value not in paths:
+                paths.append(value)
+    return paths
+
+
+def safe_relative(root: Path, path: Path) -> str | None:
+    try:
+        return path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return None
+
+
+def file_sha256(path: Path, max_bytes: int = 20_000_000) -> dict[str, Any]:
+    if not path.exists():
+        return {"exists": False}
+    if path.is_dir():
+        return {"exists": True, "type": "directory"}
+    size = path.stat().st_size
+    if size > max_bytes:
+        return {"exists": True, "skipped": "too_large", "bytes": size}
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return {"exists": True, "sha256": digest.hexdigest(), "bytes": size}
+
+
+def workspace_hashes(cwd: Path, paths: list[str], limit: int = 1000) -> dict[str, Any]:
+    important = [
+        "README.md",
+        "README.zh-CN.md",
+        "SKILL.md",
+        "CLAUDE.md",
+        ".gitignore",
+        "package.json",
+        "package-lock.json",
+        "pyproject.toml",
+        "requirements.txt",
+        ".claude-code-orchestrator/write-scope.json",
+    ]
+    selected: list[str] = []
+    for item in [*paths, *important]:
+        normalized = item.replace("\\", "/").strip("/")
+        if normalized and normalized not in selected:
+            selected.append(normalized)
+        if len(selected) >= limit:
+            break
+    hashes: dict[str, Any] = {}
+    for rel in selected:
+        candidate = (cwd / rel).resolve()
+        if safe_relative(cwd, candidate) is None:
+            continue
+        try:
+            hashes[rel] = file_sha256(candidate)
+        except Exception as exc:
+            hashes[rel] = {"error": str(exc)}
+    return hashes
+
+
+def read_json_file(path: Path, default: Any) -> Any:
+    try:
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return default
+    return default
+
+
+def write_json_file(path: Path, data: Any) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def snapshot_hashes(snapshot: dict[str, Any]) -> dict[str, Any]:
+    path = snapshot.get("hashes_path")
+    if not path:
+        return {}
+    return read_json_file(Path(str(path)), {})
+
+
+def changed_paths_between_snapshots(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
+    before_hashes = snapshot_hashes(before)
+    after_hashes = snapshot_hashes(after)
+    changed: set[str] = set()
+    for path, after_value in after_hashes.items():
+        if before_hashes.get(path) != after_value:
+            changed.add(path)
+    for path in before_hashes:
+        if path not in after_hashes:
+            changed.add(path)
+    before_status = set(str(p).replace("\\", "/") for p in before.get("changed_paths", []) or [])
+    after_status = set(str(p).replace("\\", "/") for p in after.get("changed_paths", []) or [])
+    changed.update(after_status - before_status)
+    before_untracked = set(str(p).replace("\\", "/") for p in before.get("untracked_paths", []) or [])
+    after_untracked = set(str(p).replace("\\", "/") for p in after.get("untracked_paths", []) or [])
+    changed.update(after_untracked - before_untracked)
+    return sorted(path for path in changed if path)
+
+
+def current_git_changed_paths(cwd: Path) -> list[str]:
+    status_proc = run_git_command(cwd, ["status", "--porcelain=v1", "-z"], timeout=30)
+    if status_proc.returncode != 0:
+        return []
+    return status_paths(parse_porcelain_status(status_proc.stdout or ""))
+
+
 def pid_alive(pid: int | None) -> bool:
     if not pid or pid <= 0:
         return False
@@ -553,6 +732,332 @@ def summarize_events(events: list[dict[str, Any]]) -> dict[str, Any]:
     return {"latest_phase": phase, "tool_calls": tool_calls[-20:]}
 
 
+def read_events(path: Path, max_lines: int | None = None) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    if max_lines is not None and max_lines > 0:
+        lines = lines[-max_lines:]
+    events: list[dict[str, Any]] = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            events.append({"type": "unparsed", "text": str(redact(line))[:1000]})
+    return events
+
+
+def event_text(event: dict[str, Any], limit: int = 240) -> str:
+    payload = event.get("payload")
+    if isinstance(payload, dict):
+        text = payload.get("text")
+        if isinstance(text, str):
+            return str(redact(text)).strip()[:limit]
+        message = payload.get("message")
+        if isinstance(message, dict):
+            content = message.get("content")
+            if isinstance(content, list):
+                parts: list[str] = []
+                for item in content:
+                    if isinstance(item, dict):
+                        if isinstance(item.get("text"), str):
+                            parts.append(str(item["text"]))
+                        elif item.get("name"):
+                            parts.append(f"tool:{item.get('name')}")
+                if parts:
+                    return str(redact(" ".join(parts))).strip()[:limit]
+        if isinstance(payload.get("result"), str):
+            return str(redact(payload["result"])).strip()[:limit]
+    text = event.get("text")
+    if isinstance(text, str):
+        return str(redact(text)).strip()[:limit]
+    return str(redact(event.get("type") or event.get("phase") or ""))[:limit]
+
+
+def compact_event(event: dict[str, Any]) -> dict[str, Any]:
+    payload = event.get("payload") if isinstance(event, dict) else None
+    tool_calls = extract_tool_calls_from_payload(payload)
+    return {
+        "seq": event.get("seq"),
+        "ts": event.get("ts"),
+        "type": event.get("type"),
+        "source": event.get("source"),
+        "phase": event.get("phase") or extract_event_phase(payload, str(event.get("source", ""))),
+        "text": event_text(event),
+        "tool_calls": tool_calls[:5],
+    }
+
+
+def compact_events(
+    run_id: str,
+    event_offset: int = 0,
+    max_bytes: int = 20000,
+    max_events: int = 20,
+    write_artifacts: bool = False,
+) -> dict[str, Any]:
+    run_dir = safe_run_dir(run_id)
+    events_path = run_dir / "events.ndjson"
+    delta = parse_events_delta(events_path, offset=event_offset, max_bytes=max_bytes)
+    recent = read_events(events_path, max_lines=max(max_events * 4, 80))
+    compact_recent = [compact_event(event) for event in recent][-max_events:]
+    summary = summarize_events(recent)
+    timeline_md = build_tool_timeline_md(compact_recent)
+    artifact_paths = {
+        "tool_timeline": str(run_dir / CONTROLLER_ARTIFACTS["tool_timeline"]),
+    }
+    if write_artifacts:
+        (run_dir / CONTROLLER_ARTIFACTS["tool_timeline"]).write_text(timeline_md, encoding="utf-8")
+    return {
+        "ok": True,
+        "run_id": run_id,
+        "events_path": str(events_path),
+        "offset": delta["offset"],
+        "next_offset": delta["next_offset"],
+        "size": delta["size"],
+        "truncated": delta["truncated"],
+        "new_event_count": len(delta["events"]),
+        "recent_event_count": len(recent),
+        "items": compact_recent,
+        "latest_phase": summary.get("latest_phase"),
+        "tool_calls": summary.get("tool_calls", []),
+        "tool_timeline": timeline_md,
+        "artifact_paths": artifact_paths,
+    }
+
+
+def build_tool_timeline_md(events: list[dict[str, Any]]) -> str:
+    lines = ["# Run Timeline", "", f"Generated: {utc_now_iso()}", ""]
+    if not events:
+        lines.append("- No events found yet.")
+        return "\n".join(lines).rstrip() + "\n"
+    for event in events:
+        ts = str(event.get("ts") or "")
+        clock = ts[11:19] if len(ts) >= 19 else ts
+        phase = event.get("phase") or event.get("type") or "event"
+        text = str(event.get("text") or "").replace("\n", " ").strip()
+        tools = ", ".join(str(call.get("name") or "tool") for call in event.get("tool_calls") or [])
+        suffix = f" tools: {tools}" if tools else ""
+        lines.append(f"- `{clock}` **{phase}** {text}{suffix}".rstrip())
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def changed_files_for_run(run_id: str) -> dict[str, Any]:
+    run_dir = safe_run_dir(run_id)
+    metadata = read_metadata(run_dir)
+    before = metadata.get("git_before") or {}
+    after = metadata.get("git_after") or {}
+    files = changed_paths_between_snapshots(before, after) if before or after else []
+    return {
+        "ok": True,
+        "run_id": run_id,
+        "cwd": metadata.get("cwd"),
+        "source": "run_snapshots" if before or after else "none",
+        "file_count": len(files),
+        "files": files,
+    }
+
+
+def _iso_age_seconds(ts: str | None) -> float | None:
+    if not ts:
+        return None
+    try:
+        value = datetime.fromisoformat(str(ts))
+        return max(0.0, (datetime.now(timezone.utc) - value).total_seconds())
+    except Exception:
+        return None
+
+
+def detect_failure_modes(
+    run_id: str,
+    status: dict[str, Any] | None = None,
+    compact: dict[str, Any] | None = None,
+    changed_files: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    run_dir = safe_run_dir(run_id)
+    status = status or single_run_status(run_id, include_output_tail=True, tail_chars=4000)
+    compact = compact or compact_events(run_id, max_events=30, write_artifacts=False)
+    changed_files = changed_files or changed_files_for_run(run_id)
+    stdout_tail = tail_file(run_dir / "stdout.txt", chars=12000)
+    stderr_tail = tail_file(run_dir / "stderr.txt", chars=6000)
+    merged_tail = f"{stdout_tail}\n{stderr_tail}"
+    flags: list[dict[str, Any]] = []
+
+    events = compact.get("items") or []
+    last_event = events[-1] if events else {}
+    last_age = _iso_age_seconds(str(last_event.get("ts") or "")) if last_event else None
+    if status.get("active") and last_age is not None and last_age > 180:
+        flags.append({"code": "stalled", "severity": "medium", "message": f"No compact event for {int(last_age)} seconds."})
+    if status.get("timed_out") or status.get("status") == "timed_out":
+        flags.append({"code": "timed_out", "severity": "high", "message": "Worker exceeded timeout."})
+    if int(status.get("stdout_bytes") or 0) + int(status.get("stderr_bytes") or 0) > 500_000:
+        flags.append({"code": "excessive_output", "severity": "medium", "message": "Run produced more than 500 KB of output."})
+
+    search_lines = [event for event in events if FAILURE_PATTERNS["repeated_search"].search(str(event.get("text") or ""))]
+    if len(search_lines) >= 8:
+        flags.append({"code": "repeated_search", "severity": "medium", "message": "Many recent events look like repeated search/listing work."})
+
+    if FAILURE_PATTERNS["permission_risk"].search(merged_tail):
+        flags.append({"code": "destructive_command_risk", "severity": "high", "message": "Output mentions a potentially destructive shell command."})
+
+    if FAILURE_PATTERNS["test_failed"].search(merged_tail) and FAILURE_PATTERNS["claimed_success"].search(merged_tail):
+        flags.append({"code": "success_claim_after_test_failure", "severity": "high", "message": "Output appears to claim success while also containing test failure text."})
+
+    try:
+        scope = check_write_scope(run_id=run_id)
+        if not scope.get("ok", True):
+            flags.append({"code": "write_scope_violation", "severity": "high", "message": "Changed files violate the preflight write scope.", "violations": scope.get("violations", [])})
+    except Exception as exc:
+        flags.append({"code": "write_scope_unknown", "severity": "low", "message": str(exc)})
+
+    try:
+        scan = secret_scan_run(run_id, include_diff=False)
+        if scan.get("finding_count"):
+            flags.append({"code": "possible_secret_output", "severity": "critical", "message": "Run logs may contain credentials.", "finding_count": scan.get("finding_count")})
+    except Exception as exc:
+        flags.append({"code": "secret_scan_unknown", "severity": "low", "message": str(exc)})
+
+    watched = {".env", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "uv.lock"}
+    unrelated = [path for path in changed_files.get("files", []) if Path(path).name in watched]
+    if unrelated:
+        flags.append({"code": "sensitive_file_changed", "severity": "medium", "message": "Worker changed sensitive or lock/config files.", "files": unrelated})
+
+    severity_order = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+    flags.sort(key=lambda item: severity_order.get(str(item.get("severity")), 0), reverse=True)
+    return {
+        "ok": not any(str(flag.get("severity")) in {"critical", "high"} for flag in flags),
+        "run_id": run_id,
+        "flag_count": len(flags),
+        "flags": flags,
+        "needs_controller_attention": bool(flags),
+    }
+
+
+def controller_recommendation(status: dict[str, Any], risks: dict[str, Any]) -> str:
+    flags = risks.get("flags", [])
+    if any(flag.get("severity") in {"critical", "high"} for flag in flags):
+        return "stop_or_review" if status.get("active") else "blocked_review"
+    if status.get("active"):
+        return "continue_polling"
+    if status.get("status") == "succeeded":
+        return "verify_run"
+    if status.get("status") in {"failed", "timed_out", "lost"}:
+        return "inspect_or_restart"
+    return "controller_review"
+
+
+def progress_summary_for_run(
+    run_id: str,
+    status: dict[str, Any],
+    compact: dict[str, Any],
+    changed_files: dict[str, Any],
+    risks: dict[str, Any],
+    max_summary_chars: int = 2000,
+) -> dict[str, Any]:
+    recent = compact.get("items") or []
+    last = recent[-1] if recent else {}
+    tool_names: list[str] = []
+    for call in compact.get("tool_calls") or []:
+        name = call.get("name")
+        if name and name not in tool_names:
+            tool_names.append(str(name))
+    summary = {
+        "ok": True,
+        "run_id": run_id,
+        "status": status.get("status"),
+        "active": status.get("active"),
+        "role": status.get("role"),
+        "model": (status.get("profile") or {}).get("model"),
+        "phase": compact.get("latest_phase") or status.get("latest_phase"),
+        "elapsed_ms": status.get("elapsed_ms"),
+        "last_event": {
+            "ts": last.get("ts"),
+            "phase": last.get("phase") or last.get("type"),
+            "text": str(last.get("text") or "")[:max_summary_chars],
+        },
+        "last_stdout_line": str(status.get("last_stdout_line") or "")[:max_summary_chars],
+        "last_stderr_line": str(status.get("last_stderr_line") or "")[:max_summary_chars],
+        "tool_call_count": len(compact.get("tool_calls") or []),
+        "recent_tools": tool_names[-10:],
+        "changed_file_count": changed_files.get("file_count", 0),
+        "changed_files": changed_files.get("files", [])[:50],
+        "risk_flag_count": risks.get("flag_count", 0),
+        "needs_controller_attention": risks.get("needs_controller_attention", False),
+        "recommended_action": controller_recommendation(status, risks),
+    }
+    return summary
+
+
+def write_latest_decision(run_dir: Path, summary: dict[str, Any], risks: dict[str, Any]) -> Path:
+    lines = [
+        "# Latest Controller Decision",
+        "",
+        f"Run: `{summary.get('run_id')}`",
+        f"Status: `{summary.get('status')}`",
+        f"Phase: `{summary.get('phase')}`",
+        f"Recommended action: `{summary.get('recommended_action')}`",
+        f"Needs attention: `{summary.get('needs_controller_attention')}`",
+        "",
+        "## Last Event",
+        str((summary.get("last_event") or {}).get("text") or "-"),
+        "",
+        "## Risk Flags",
+    ]
+    flags = risks.get("flags") or []
+    if flags:
+        for flag in flags:
+            lines.append(f"- `{flag.get('severity')}` `{flag.get('code')}`: {flag.get('message')}")
+    else:
+        lines.append("- None detected.")
+    path = run_dir / CONTROLLER_ARTIFACTS["latest_decision"]
+    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    return path
+
+
+def summarize_run(
+    run_id: str,
+    event_offset: int = 0,
+    max_bytes: int = 20000,
+    max_events: int = 20,
+    max_summary_chars: int = 2000,
+    write_artifacts: bool = True,
+) -> dict[str, Any]:
+    run_dir = safe_run_dir(run_id)
+    status = single_run_status(run_id, include_output_tail=False, tail_chars=0)
+    compact = compact_events(run_id, event_offset=event_offset, max_bytes=max_bytes, max_events=max_events, write_artifacts=write_artifacts)
+    changed_files = changed_files_for_run(run_id)
+    risks = detect_failure_modes(run_id, status=status, compact=compact, changed_files=changed_files)
+    progress = progress_summary_for_run(run_id, status, compact, changed_files, risks, max_summary_chars=max_summary_chars)
+    artifact_paths = {
+        "progress_summary": str(run_dir / CONTROLLER_ARTIFACTS["progress_summary"]),
+        "latest_decision": str(run_dir / CONTROLLER_ARTIFACTS["latest_decision"]),
+        "risk_flags": str(run_dir / CONTROLLER_ARTIFACTS["risk_flags"]),
+        "changed_files": str(run_dir / CONTROLLER_ARTIFACTS["changed_files"]),
+        "tool_timeline": str(run_dir / CONTROLLER_ARTIFACTS["tool_timeline"]),
+    }
+    if write_artifacts:
+        write_json_file(run_dir / CONTROLLER_ARTIFACTS["progress_summary"], progress)
+        write_json_file(run_dir / CONTROLLER_ARTIFACTS["risk_flags"], risks)
+        write_json_file(run_dir / CONTROLLER_ARTIFACTS["changed_files"], changed_files)
+        (run_dir / CONTROLLER_ARTIFACTS["tool_timeline"]).write_text(compact.get("tool_timeline") or "", encoding="utf-8")
+        write_latest_decision(run_dir, progress, risks)
+    return {
+        "ok": True,
+        "run_id": run_id,
+        "progress_summary": progress,
+        "risk_flags": risks,
+        "changed_files": changed_files,
+        "tool_timeline": compact.get("tool_timeline"),
+        "offsets": {
+            "event_offset": compact.get("offset"),
+            "next_event_offset": compact.get("next_offset"),
+            "events_size": compact.get("size"),
+        },
+        "artifact_paths": artifact_paths,
+    }
+
+
 def list_profiles(ccswitch_home: str | Path | None = None, include_secrets: bool = False) -> list[dict[str, Any]]:
     resolved_home = resolve_ccswitch_home(ccswitch_home)
     db_path = cc_db_path(resolved_home)
@@ -708,6 +1213,134 @@ def score_models(ccswitch_home: str | Path | None = None) -> dict[str, Any]:
     }
 
 
+def load_local_policy_override() -> dict[str, Any]:
+    return read_json_file(
+        LOCAL_POLICY_OVERRIDE_PATH,
+        {
+            "updated_at": None,
+            "preferred_models": {},
+            "preferred_profiles": {},
+            "notes": "User-owned local routing overrides. This file is ignored by git and preserved across upgrades.",
+        },
+    )
+
+
+def local_policy_override(config: dict[str, Any] | None = None, apply: bool = False) -> dict[str, Any]:
+    current = load_local_policy_override()
+    if config:
+        for key, value in config.items():
+            if isinstance(value, dict) and isinstance(current.get(key), dict):
+                current[key].update(value)
+            else:
+                current[key] = value
+        current["updated_at"] = utc_now_iso()
+    if apply:
+        write_json_file(LOCAL_POLICY_OVERRIDE_PATH, current)
+    return {"ok": True, "applied": apply, "path": str(LOCAL_POLICY_OVERRIDE_PATH), "policy": current}
+
+
+def model_matches_preference(item: dict[str, Any], wanted: str) -> bool:
+    needle = wanted.strip().lower()
+    if not needle:
+        return False
+    compact_needle = re.sub(r"[^a-z0-9]+", "", needle)
+    for key in ("model", "profile_name", "profile_id"):
+        value = str(item.get(key) or "").lower()
+        compact_value = re.sub(r"[^a-z0-9]+", "", value)
+        if needle in value or value in needle or compact_needle in compact_value or compact_value in compact_needle:
+            return True
+    return False
+
+
+def find_override_model(scored: list[dict[str, Any]], role: str, task_type: str | None = None) -> dict[str, Any] | None:
+    override = load_local_policy_override()
+    preferred_models = override.get("preferred_models") or {}
+    preferred_profiles = override.get("preferred_profiles") or {}
+    keys = [role, task_type or "", "default"]
+    for key in keys:
+        wanted_profile = str(preferred_profiles.get(key) or "").strip()
+        if wanted_profile:
+            for item in scored:
+                if model_matches_preference(item, wanted_profile):
+                    chosen = dict(item)
+                    chosen["override_reason"] = f"Selected by local_policy.override.json preferred_profiles.{key}."
+                    return chosen
+        wanted_model = str(preferred_models.get(key) or "").strip()
+        if wanted_model:
+            for item in scored:
+                if model_matches_preference(item, wanted_model):
+                    chosen = dict(item)
+                    chosen["override_reason"] = f"Selected by local_policy.override.json preferred_models.{key}."
+                    return chosen
+    return None
+
+
+def load_model_benchmark_history() -> dict[str, Any]:
+    return read_json_file(MODEL_BENCHMARK_HISTORY_PATH, {"updated_at": None, "records": []})
+
+
+def append_model_benchmark_history(record: dict[str, Any]) -> None:
+    history = load_model_benchmark_history()
+    history.setdefault("records", []).append(record)
+    history["updated_at"] = utc_now_iso()
+    write_json_file(MODEL_BENCHMARK_HISTORY_PATH, history)
+
+
+def load_worker_quality_history() -> dict[str, Any]:
+    return read_json_file(WORKER_QUALITY_HISTORY_PATH, {"updated_at": None, "records": []})
+
+
+def build_model_registry(refresh: bool = True, apply: bool = False) -> dict[str, Any]:
+    scored = score_models()["models"] if refresh else []
+    history = load_model_benchmark_history()
+    quality = load_worker_quality_history()
+    registry: dict[str, Any] = {
+        "updated_at": utc_now_iso(),
+        "source": "CCSwitch scan plus benchmark history plus worker quality history",
+        "models": {},
+    }
+    for item in scored:
+        model = str(item.get("model") or "unknown")
+        entry = registry["models"].setdefault(
+            model,
+            {
+                "model": model,
+                "profiles": [],
+                "heuristic_scores": item.get("scores", {}),
+                "role_scores": item.get("role_scores", {}),
+                "benchmark_runs": [],
+                "worker_quality": {"runs": 0, "average_score": None, "by_role": {}},
+            },
+        )
+        entry["profiles"].append({"profile_id": item.get("profile_id"), "profile_name": item.get("profile_name"), "current": item.get("current_profile")})
+    for record in history.get("records", []):
+        model = str(record.get("model") or "unknown")
+        entry = registry["models"].setdefault(model, {"model": model, "profiles": [], "heuristic_scores": {}, "role_scores": {}, "benchmark_runs": [], "worker_quality": {"runs": 0, "average_score": None, "by_role": {}}})
+        entry.setdefault("benchmark_runs", []).append(record)
+    grouped_quality: dict[str, list[dict[str, Any]]] = {}
+    for record in quality.get("records", []):
+        grouped_quality.setdefault(str(record.get("model") or "unknown"), []).append(record)
+    for model, records in grouped_quality.items():
+        entry = registry["models"].setdefault(model, {"model": model, "profiles": [], "heuristic_scores": {}, "role_scores": {}, "benchmark_runs": [], "worker_quality": {"runs": 0, "average_score": None, "by_role": {}}})
+        scores = [float(record.get("quality_score") or 0) for record in records]
+        by_role: dict[str, dict[str, Any]] = {}
+        for record in records:
+            role = str(record.get("role") or "unknown")
+            bucket = by_role.setdefault(role, {"runs": 0, "average_score": 0.0})
+            bucket["runs"] += 1
+            bucket["average_score"] += float(record.get("quality_score") or 0)
+        for bucket in by_role.values():
+            bucket["average_score"] = round(bucket["average_score"] / max(1, int(bucket["runs"])), 2)
+        entry["worker_quality"] = {
+            "runs": len(records),
+            "average_score": round(sum(scores) / len(scores), 2) if scores else None,
+            "by_role": by_role,
+        }
+    if apply:
+        write_json_file(MODEL_REGISTRY_PATH, registry)
+    return {"ok": True, "applied": apply, "path": str(MODEL_REGISTRY_PATH), "registry": registry}
+
+
 def select_model_for_role(role: str = "implementation", task_type: str | None = None, ccswitch_home: str | Path | None = None) -> dict[str, Any]:
     target = role if role in ROLE_SCORE_WEIGHTS else "implementation"
     if task_type == "multimodal":
@@ -741,6 +1374,15 @@ def select_model_for_role(role: str = "implementation", task_type: str | None = 
             "model": provider.model,
             "score": None,
             "reason": "No explicit models found; using current CCSwitch Claude profile.",
+        }
+    override = find_override_model(scored, target, task_type=task_type)
+    if override:
+        return {
+            "profile": override["profile_name"],
+            "model": override["model"],
+            "score": override["role_scores"].get(target, override["overall"]),
+            "reason": override.get("override_reason") or f"Selected local override for {target}.",
+            "scores": override["scores"],
         }
     best = max(
         scored,
@@ -816,6 +1458,7 @@ def healthcheck() -> dict[str, Any]:
         "ccswitch_settings_exists": settings_path.exists(),
         "policy_exists": POLICY_PATH.exists(),
         "agents_exists": AGENTS_PATH.exists(),
+        "version_exists": VERSION_PATH.exists(),
     }
     try:
         profiles = list_profiles()
@@ -867,41 +1510,45 @@ def build_prompt(role: str, task: str, context: str | None = None) -> str:
 
 
 def capture_git_snapshot(run_dir: Path, cwd: Path, label: str) -> dict[str, Any]:
-    """Capture git diff/status for audit and conservative rollback."""
+    """Capture git diff/status, untracked files, and key file hashes."""
     result = {"ok": False, "label": label, "is_git_repo": False}
     if not (cwd / ".git").exists():
         return result
     try:
-        diff_proc = subprocess.run(
-            ["git", "diff", "--binary", "--", "."],
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=60,
-        )
-        status_proc = subprocess.run(
-            ["git", "status", "--short"],
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=30,
-        )
+        diff_proc = run_git_command(cwd, ["diff", "--binary", "--", "."], timeout=60)
+        status_proc = run_git_command(cwd, ["status", "--short"], timeout=30)
+        porcelain_proc = run_git_command(cwd, ["status", "--porcelain=v1", "-z"], timeout=30)
+        untracked_proc = run_git_command(cwd, ["ls-files", "--others", "--exclude-standard", "-z"], timeout=30)
+        status_items = parse_porcelain_status(porcelain_proc.stdout or "") if porcelain_proc.returncode == 0 else []
+        changed_paths = status_paths(status_items)
+        untracked_paths = [part.replace("\\", "/") for part in (untracked_proc.stdout or "").split("\0") if part] if untracked_proc.returncode == 0 else []
+        hashes = workspace_hashes(cwd, [*changed_paths, *untracked_paths])
         diff_path = run_dir / f"git_{label}.diff"
         status_path = run_dir / f"git_{label}_status.txt"
+        porcelain_path = run_dir / f"git_{label}_porcelain.json"
+        untracked_path = run_dir / f"git_{label}_untracked.txt"
+        hashes_path = run_dir / f"git_{label}_hashes.json"
         diff_path.write_text(str(redact(diff_proc.stdout or diff_proc.stderr or "")), encoding="utf-8")
         status_path.write_text(str(redact(status_proc.stdout or status_proc.stderr or "")), encoding="utf-8")
+        porcelain_path.write_text(json.dumps(status_items, ensure_ascii=False, indent=2), encoding="utf-8")
+        untracked_path.write_text("\n".join(untracked_paths) + ("\n" if untracked_paths else ""), encoding="utf-8")
+        hashes_path.write_text(json.dumps(hashes, ensure_ascii=False, indent=2), encoding="utf-8")
         return {
-            "ok": diff_proc.returncode == 0 and status_proc.returncode == 0,
+            "ok": diff_proc.returncode == 0 and status_proc.returncode == 0 and porcelain_proc.returncode == 0,
             "label": label,
             "is_git_repo": True,
             "diff_path": str(diff_path),
             "status_path": str(status_path),
+            "porcelain_path": str(porcelain_path),
+            "untracked_path": str(untracked_path),
+            "hashes_path": str(hashes_path),
             "diff_bytes": diff_path.stat().st_size,
             "status_bytes": status_path.stat().st_size,
+            "changed_paths": changed_paths,
+            "untracked_paths": untracked_paths,
+            "changed_count": len(changed_paths),
+            "untracked_count": len(untracked_paths),
+            "hash_count": len(hashes),
         }
     except Exception as exc:
         return {"ok": False, "label": label, "is_git_repo": True, "error": str(exc)}
@@ -1008,6 +1655,10 @@ def run_agent(
             "git_after": capture_git_snapshot(run_dir, effective_cwd, "after"),
         }
     )
+    (run_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    scope_check = check_write_scope(run_id=run_id)
+    metadata["write_scope_check"] = scope_check
+    metadata["acceptance_status"] = "blocked_write_scope" if not scope_check.get("ok", True) else "pending_controller_review"
     (run_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
     latest_path = RUNS_DIR / "latest.txt"
     latest_path.write_text(run_id, encoding="utf-8")
@@ -1271,6 +1922,14 @@ def stream_worker(run_id: str) -> dict[str, Any]:
         events_path=str(run_dir / "events.ndjson"),
         git_after=capture_git_snapshot(run_dir, cwd, "after"),
     )
+    scope_check = check_write_scope(run_id=run_id)
+    final_metadata = update_metadata(
+        run_dir,
+        write_scope_check=scope_check,
+        acceptance_status="blocked_write_scope" if not scope_check.get("ok", True) else "pending_controller_review",
+    )
+    if not scope_check.get("ok", True):
+        append_event(run_dir, {"type": "write_scope_blocked", "status": "blocked", "violations": scope_check.get("violations", [])})
     append_event(run_dir, {"type": "process_exited", "status": status, "exit_code": final_exit, "duration_ms": duration_ms})
     return final_metadata
 
@@ -1394,9 +2053,36 @@ def poll_run(
     max_bytes: int = 20000,
     include_output_tail: bool = True,
     tail_chars: int = 4000,
+    mode: str = "raw",
+    max_events: int = 20,
+    max_summary_chars: int = 2000,
+    write_artifacts: bool = False,
 ) -> dict[str, Any]:
     run_dir = safe_run_dir(run_id)
     status = single_run_status(run_id, include_output_tail=include_output_tail, tail_chars=tail_chars)
+    if mode == "controller":
+        summary = summarize_run(
+            run_id,
+            event_offset=event_offset,
+            max_bytes=max_bytes,
+            max_events=max_events,
+            max_summary_chars=max_summary_chars,
+            write_artifacts=write_artifacts,
+        )
+        return {
+            "ok": True,
+            "run_id": run_id,
+            "mode": "controller",
+            "status": status,
+            "offsets": summary.get("offsets", {}),
+            "progress_summary": summary.get("progress_summary"),
+            "risk_flags": summary.get("risk_flags"),
+            "changed_files": summary.get("changed_files"),
+            "tool_timeline": summary.get("tool_timeline"),
+            "artifact_paths": summary.get("artifact_paths", {}),
+        }
+    if mode != "raw":
+        raise OrchestratorError("poll_run mode must be 'raw' or 'controller'.")
     stdout_delta = read_file_delta(run_dir / "stdout.txt", offset=stdout_offset, max_bytes=max_bytes)
     stderr_delta = read_file_delta(run_dir / "stderr.txt", offset=stderr_offset, max_bytes=max_bytes)
     events_delta = parse_events_delta(run_dir / "events.ndjson", offset=event_offset, max_bytes=max_bytes)
@@ -1498,19 +2184,38 @@ def send_instruction(
     else:
         stop = {"ok": True, "status": "already_finished"}
     metadata = read_metadata(safe_run_dir(run_id))
+    run_dir = safe_run_dir(run_id)
+    original_prompt = (run_dir / "prompt.txt").read_text(encoding="utf-8", errors="replace") if (run_dir / "prompt.txt").exists() else ""
+    events_tail = tail_file(run_dir / "events.ndjson", chars=12000)
     context = "\n".join(
         [
             f"Previous run id: {run_id}",
             f"Previous status: {status.get('status')}",
+            f"Previous role: {metadata.get('role')}",
+            f"Previous task type: {metadata.get('task_type')}",
+            f"Previous cwd: {metadata.get('cwd')}",
+            f"Previous model: {(metadata.get('profile') or {}).get('model')}",
+            "",
+            "Original prompt:",
+            original_prompt[-12000:],
             "",
             "Previous stdout tail:",
-            str(status.get("stdout_tail", ""))[-6000:],
+            str(status.get("stdout_tail", ""))[-10000:],
             "",
             "Previous stderr tail:",
-            str(status.get("stderr_tail", ""))[-2000:],
+            str(status.get("stderr_tail", ""))[-4000:],
+            "",
+            "Previous stream events tail:",
+            events_tail[-12000:],
             "",
             "New instruction:",
             instruction.strip(),
+            "",
+            "Recovery rules:",
+            "- Treat this as a resumed run, not a fresh unrelated task.",
+            "- Do not repeat work that the previous run clearly completed.",
+            "- If prior context is ambiguous, state the uncertainty before acting.",
+            "- Preserve the previous write scope and safety rules.",
         ]
     )
     task = "Continue the previous Claude Code worker run using the new instruction. Preserve useful context, avoid repeating completed work, and report what changed."
@@ -1682,6 +2387,119 @@ def preflight_write_scope(
     return {"ok": True, "path": str(path), "scope": data}
 
 
+def load_write_scope(cwd: Path) -> tuple[Path, dict[str, Any] | None]:
+    path = cwd.resolve() / ".claude-code-orchestrator" / "write-scope.json"
+    if not path.exists():
+        return path, None
+    return path, json.loads(path.read_text(encoding="utf-8"))
+
+
+def path_under(candidate: Path, parent: Path) -> bool:
+    try:
+        candidate.resolve().relative_to(parent.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def count_diff_changed_lines(diff_text: str) -> int:
+    count = 0
+    for line in diff_text.splitlines():
+        if line.startswith("+") and not line.startswith("+++"):
+            count += 1
+        elif line.startswith("-") and not line.startswith("---"):
+            count += 1
+    return count
+
+
+def check_write_scope(run_id: str | None = None, cwd: Path | None = None) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    run_dir: Path | None = None
+    if run_id:
+        run_dir = safe_run_dir(run_id)
+        metadata = read_metadata(run_dir)
+        root = Path(str(metadata.get("cwd") or cwd or Path.cwd())).resolve()
+    else:
+        root = (cwd or Path.cwd()).resolve()
+    scope_path, scope = load_write_scope(root)
+    if not scope:
+        return {
+            "ok": True,
+            "status": "no_scope",
+            "run_id": run_id,
+            "cwd": str(root),
+            "scope_path": str(scope_path),
+            "message": "No write-scope file found; Codex must review diff manually.",
+            "violations": [],
+        }
+
+    before = metadata.get("git_before") or {}
+    after = metadata.get("git_after") or {}
+    if run_id and before and after:
+        changed_paths = changed_paths_between_snapshots(before, after)
+    elif (root / ".git").exists():
+        changed_paths = current_git_changed_paths(root)
+    else:
+        changed_paths = []
+
+    allowed = [Path(item).resolve() for item in scope.get("allowed_paths", []) or []]
+    denied = [Path(item).resolve() for item in scope.get("denied_paths", []) or []]
+    violations: list[dict[str, Any]] = []
+    checked: list[str] = []
+    for rel in changed_paths:
+        normalized = rel.replace("\\", "/").strip("/")
+        if not normalized:
+            continue
+        if normalized == ".claude-code-orchestrator" or normalized.startswith(".claude-code-orchestrator/"):
+            if run_id and normalized == ".claude-code-orchestrator/write-scope.json":
+                violations.append({"path": normalized, "type": "internal_scope_modified", "message": "The run changed the write-scope file itself."})
+            continue
+        candidate = (root / normalized).resolve()
+        if safe_relative(root, candidate) is None:
+            violations.append({"path": normalized, "type": "outside_workspace", "message": "Changed path resolves outside cwd."})
+            continue
+        checked.append(normalized)
+        if allowed and not any(path_under(candidate, base) or candidate == base for base in allowed):
+            violations.append({"path": normalized, "type": "outside_allowed_paths", "message": "Changed path is not under allowed_paths."})
+        if any(path_under(candidate, base) or candidate == base for base in denied):
+            violations.append({"path": normalized, "type": "denied_path", "message": "Changed path is under denied_paths."})
+
+    max_diff_lines = int(scope.get("max_diff_lines") or 0)
+    diff_lines = 0
+    diff_source = "current"
+    if after.get("diff_path") and Path(str(after["diff_path"])).exists():
+        diff_lines = count_diff_changed_lines(Path(str(after["diff_path"])).read_text(encoding="utf-8", errors="replace"))
+        diff_source = "run_after_snapshot"
+    elif (root / ".git").exists():
+        diff_lines = count_diff_changed_lines(str(git_diff(cwd=root, limit_chars=1_000_000).get("diff", "")))
+    if max_diff_lines and diff_lines > max_diff_lines:
+        violations.append({"type": "max_diff_lines", "diff_lines": diff_lines, "limit": max_diff_lines, "message": "Diff is larger than the preflight max_diff_lines."})
+
+    ok = not violations
+    rollback_hint = None
+    if not ok:
+        rollback_hint = (
+            f"Review diff first, then run: python {Path(__file__).name} rollback-run --run-id {run_id} --confirm"
+            if run_id
+            else "Review diff and revert only the violating files."
+        )
+    return {
+        "ok": ok,
+        "status": "passed" if ok else "blocked",
+        "run_id": run_id,
+        "cwd": str(root),
+        "scope_path": str(scope_path),
+        "checked_paths": checked,
+        "changed_paths": changed_paths,
+        "violation_count": len(violations),
+        "violations": violations,
+        "diff_lines": diff_lines,
+        "diff_source": diff_source,
+        "max_diff_lines": max_diff_lines,
+        "rollback_recommendation": rollback_hint,
+    }
+
+
 def diff_summary(cwd: Path | None = None, limit_chars: int = 200000) -> dict[str, Any]:
     diff = git_diff(cwd=cwd, limit_chars=limit_chars)
     text = diff.get("diff", "")
@@ -1730,7 +2548,7 @@ def diff_summary(cwd: Path | None = None, limit_chars: int = 200000) -> dict[str
 def secret_scan_text(text: str, source: str) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     for lineno, line in enumerate(text.splitlines(), 1):
-        if SECRET_VALUE_RE.search(line) or (SECRET_KEY_RE.search(line) and "=" in line):
+        if SECRET_VALUE_RE.search(line) or SECRET_ASSIGN_RE.search(line):
             findings.append({"source": source, "line": lineno, "snippet": str(redact(line))[:500]})
     return findings
 
@@ -1843,7 +2661,7 @@ def benchmark_model(
         }
     started = time.time()
     run = run_agent(task=task, role=role, profile=profile, timeout_seconds=timeout_seconds, output_format="json")
-    return {
+    result = {
         "ok": run.get("exit_code") == 0,
         "dry_run": False,
         "profile": provider.name,
@@ -1853,6 +2671,9 @@ def benchmark_model(
         "exit_code": run.get("exit_code"),
         "stdout_tail": run.get("stdout_tail", "")[-2000:],
     }
+    append_model_benchmark_history({"recorded_at": utc_now_iso(), "type": "single", "role": role, **result})
+    build_model_registry(refresh=True, apply=True)
+    return result
 
 
 def calibrate_policy(preferences: dict[str, Any], apply: bool = True) -> dict[str, Any]:
@@ -1869,21 +2690,51 @@ def calibrate_policy(preferences: dict[str, Any], apply: bool = True) -> dict[st
 def dashboard(include_finished: bool = True, limit: int = 30, open_browser: bool = False) -> dict[str, Any]:
     DASHBOARD_DIR.mkdir(parents=True, exist_ok=True)
     data = run_status(include_finished=include_finished, include_output_tail=True, tail_chars=1000, limit=limit)
-    cards = []
+    workers = []
+    timelines = []
+    risks = []
     for item in data.get("runs", []):
-        cards.append(
-            f"<section class='card'><h2>{item.get('role')} <code>{item.get('run_id')}</code></h2>"
-            f"<p>Status: <b>{item.get('status')}</b> Active: {item.get('active')} Elapsed: {item.get('elapsed_ms')} ms</p>"
-            f"<p>Model: {(item.get('profile') or {}).get('model')}</p>"
-            f"<pre>{str(item.get('last_stdout_line') or item.get('last_stderr_line') or '')}</pre></section>"
+        try:
+            summary = summarize_run(str(item.get("run_id")), max_events=12, write_artifacts=True)
+            progress = summary.get("progress_summary") or {}
+            risk = summary.get("risk_flags") or {}
+            changed = summary.get("changed_files") or {}
+            timeline_text = str(summary.get("tool_timeline") or "")
+        except Exception as exc:
+            progress = {"recommended_action": "inspect", "phase": item.get("latest_phase"), "last_event": {"text": str(exc)}}
+            risk = {"flags": [{"severity": "low", "code": "dashboard_summary_failed", "message": str(exc)}]}
+            changed = {"files": []}
+            timeline_text = ""
+        run_id = str(item.get("run_id"))
+        workers.append(
+            f"<button class='worker'><span><b>{item.get('role') or 'worker'}</b><code>{run_id}</code></span>"
+            f"<small>{item.get('status')} · {(item.get('profile') or {}).get('model') or 'unknown model'}</small></button>"
+        )
+        timeline_lines = "".join(f"<li>{html_lib.escape(line[2:] if line.startswith('- ') else line)}</li>" for line in timeline_text.splitlines() if line.startswith("- "))
+        timelines.append(
+            f"<section class='panel'><h2>{item.get('role')} <code>{run_id}</code></h2>"
+            f"<p><b>{progress.get('recommended_action')}</b> · phase {progress.get('phase') or 'unknown'} · changed {changed.get('file_count', 0)} files</p>"
+            f"<ol>{timeline_lines or '<li>No timeline events yet.</li>'}</ol></section>"
+        )
+        risk_items = "".join(f"<li><b>{html_lib.escape(str(flag.get('severity')))}</b> {html_lib.escape(str(flag.get('code')))}: {html_lib.escape(str(flag.get('message')))}</li>" for flag in risk.get("flags", []))
+        risks.append(
+            f"<section class='panel'><h2>Risk <code>{run_id}</code></h2>"
+            f"<ul>{risk_items or '<li>No risk flags detected.</li>'}</ul>"
+            f"<p>Files: {html_lib.escape(', '.join(changed.get('files', [])[:8]) or 'none')}</p></section>"
         )
     html = "\n".join(
         [
             "<!doctype html><html><head><meta charset='utf-8'><title>Claude Code Workers</title>",
-            "<style>body{font-family:system-ui;background:#0d1117;color:#e6edf3;margin:24px}.card{border:1px solid #30363d;border-radius:8px;padding:16px;margin:12px 0;background:#161b22}code{color:#7ee787}pre{white-space:pre-wrap;color:#a5d6ff}</style>",
-            "</head><body><h1>Claude Code Worker Dashboard</h1>",
-            f"<p>Generated at {utc_now_iso()}</p>",
-            "".join(cards) if cards else "<p>No runs found.</p>",
+            "<style>body{font-family:system-ui;background:#0d1117;color:#e6edf3;margin:0}header{padding:16px 20px;border-bottom:1px solid #30363d;background:#161b22}.grid{display:grid;grid-template-columns:280px minmax(360px,1fr) 360px;gap:16px;padding:16px}.panel,.worker{border:1px solid #30363d;border-radius:8px;background:#161b22}.panel{padding:14px;margin-bottom:12px}.worker{width:100%;text-align:left;color:#e6edf3;padding:12px;margin-bottom:10px;display:block}.worker span{display:flex;justify-content:space-between;gap:8px}.worker small{display:block;color:#8b949e;margin-top:6px}code{color:#7ee787}ol,ul{padding-left:22px}li{margin:8px 0;line-height:1.35}p{color:#c9d1d9}</style>",
+            "</head><body><header><h1>Claude Code Worker Dashboard</h1>",
+            f"<p>Generated at {utc_now_iso()} · Runs {data.get('count', 0)} · Active {data.get('active_count', 0)}</p></header>",
+            "<main class='grid'><aside>",
+            "".join(workers) if workers else "<p>No runs found.</p>",
+            "</aside><section>",
+            "".join(timelines),
+            "</section><aside>",
+            "".join(risks),
+            "</aside></main>",
             "</body></html>",
         ]
     )
@@ -1947,6 +2798,640 @@ def export_report(run_id: str | None = None, team_id: str | None = None, output_
     path = report_dir / name
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
     return {"ok": True, "path": str(path), "run_id": run_id, "team_id": team_id}
+
+
+def run_test_command(command: str, cwd: Path, timeout_seconds: int = 300) -> dict[str, Any]:
+    started = time.time()
+    try:
+        proc = subprocess.run(
+            command,
+            cwd=str(cwd),
+            shell=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_seconds,
+        )
+        return {
+            "command": command,
+            "ok": proc.returncode == 0,
+            "exit_code": proc.returncode,
+            "duration_ms": int((time.time() - started) * 1000),
+            "stdout_tail": str(redact(proc.stdout or ""))[-4000:],
+            "stderr_tail": str(redact(proc.stderr or ""))[-4000:],
+        }
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "command": command,
+            "ok": False,
+            "exit_code": 124,
+            "timed_out": True,
+            "duration_ms": int((time.time() - started) * 1000),
+            "stdout_tail": str(redact(subprocess_text(exc.stdout)))[-4000:],
+            "stderr_tail": str(redact(subprocess_text(exc.stderr)))[-4000:],
+        }
+
+
+def verify_run(
+    run_id: str,
+    test_commands: list[str] | None = None,
+    test_timeout_seconds: int = 300,
+    include_diff: bool = True,
+) -> dict[str, Any]:
+    run_dir = safe_run_dir(run_id)
+    metadata = read_metadata(run_dir)
+    cwd = Path(str(metadata.get("cwd") or Path.cwd()))
+    status = single_run_status(run_id, include_output_tail=True, tail_chars=6000)
+    scope = check_write_scope(run_id=run_id)
+    scan = secret_scan_run(run_id, include_diff=include_diff)
+    diff = diff_summary(cwd=cwd)
+    tests = [run_test_command(command, cwd=cwd, timeout_seconds=test_timeout_seconds) for command in (test_commands or [])]
+    failures = detect_failure_modes(run_id, status=status)
+    gates = {
+        "run_finished_successfully": (not status.get("active")) and status.get("status") == "succeeded",
+        "write_scope_ok": bool(scope.get("ok", True)),
+        "secret_scan_ok": bool(scan.get("ok")),
+        "failure_modes_ok": bool(failures.get("ok", True)),
+        "tests_ok": all(item.get("ok") for item in tests) if tests else True,
+    }
+    ok = all(gates.values())
+    report_dir = REPORTS_DIR
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report_path = report_dir / f"verify-{run_id}.md"
+    lines = [
+        "# Run Verification",
+        "",
+        f"Run: `{run_id}`",
+        f"Generated: {utc_now_iso()}",
+        "",
+        "## Gates",
+        *[f"- {name}: `{'pass' if value else 'fail'}`" for name, value in gates.items()],
+        "",
+        "## Diff",
+        f"- Files: `{diff.get('file_count')}`",
+        f"- Added: `{diff.get('total_added')}`",
+        f"- Deleted: `{diff.get('total_deleted')}`",
+        f"- Needs tests: `{diff.get('needs_tests')}`",
+        "",
+        "## Write Scope",
+        f"- Status: `{scope.get('status')}`",
+        f"- Violations: `{scope.get('violation_count', 0)}`",
+        "",
+        "## Secret Scan",
+        f"- Findings: `{scan.get('finding_count')}`",
+        "",
+        "## Failure Modes",
+        f"- Flags: `{failures.get('flag_count', 0)}`",
+        "",
+        "## Tests",
+    ]
+    if tests:
+        for item in tests:
+            lines.append(f"- `{item['command']}` -> `{'pass' if item.get('ok') else 'fail'}` exit `{item.get('exit_code')}`")
+    else:
+        lines.append("- No test commands provided.")
+    if not ok:
+        lines.extend(["", "## Blocking Notes"])
+        if not scope.get("ok", True):
+            lines.append(f"- Write scope blocked acceptance. {scope.get('rollback_recommendation') or ''}".strip())
+        if scan.get("finding_count"):
+            lines.append("- Secret scan found possible credentials. Review logs before sharing output.")
+        if not failures.get("ok", True):
+            lines.append("- Failure-mode detection found blocking run behavior.")
+        if tests and not gates["tests_ok"]:
+            lines.append("- One or more test commands failed.")
+        if not gates["run_finished_successfully"]:
+            lines.append("- Run did not finish successfully.")
+    report_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    worker_quality = score_worker(run_id, solved=ok, apply=True, source="verify_run")
+    result = {
+        "ok": ok,
+        "run_id": run_id,
+        "status": status,
+        "gates": gates,
+        "diff_summary": diff,
+        "write_scope": scope,
+        "secret_scan": scan,
+        "failure_modes": failures,
+        "worker_quality": worker_quality,
+        "tests": tests,
+        "report_path": str(report_path),
+    }
+    update_metadata(run_dir, verification=result, acceptance_status="verified" if ok else "blocked_verification")
+    return result
+
+
+def estimate_tokens_from_text(text: str) -> int:
+    return max(0, int(len(text) / 4))
+
+
+def estimate_run_usage(run_id: str) -> dict[str, Any]:
+    run_dir = safe_run_dir(run_id)
+    metadata = read_metadata(run_dir)
+    prompt = (run_dir / "prompt.txt").read_text(encoding="utf-8", errors="replace") if (run_dir / "prompt.txt").exists() else ""
+    stdout = (run_dir / "stdout.txt").read_text(encoding="utf-8", errors="replace") if (run_dir / "stdout.txt").exists() else ""
+    stderr = (run_dir / "stderr.txt").read_text(encoding="utf-8", errors="replace") if (run_dir / "stderr.txt").exists() else ""
+    profile = metadata.get("profile") or {}
+    input_tokens = estimate_tokens_from_text(prompt)
+    output_tokens = estimate_tokens_from_text(stdout + "\n" + stderr)
+    return {
+        "run_id": run_id,
+        "started_at": metadata.get("started_at"),
+        "finished_at": metadata.get("finished_at"),
+        "status": metadata.get("status") or ("succeeded" if metadata.get("exit_code") == 0 else "failed" if metadata.get("exit_code") is not None else "unknown"),
+        "role": metadata.get("role"),
+        "profile": profile.get("name"),
+        "model": profile.get("model"),
+        "duration_ms": metadata.get("duration_ms"),
+        "input_tokens_est": input_tokens,
+        "output_tokens_est": output_tokens,
+        "total_tokens_est": input_tokens + output_tokens,
+    }
+
+
+def score_worker(
+    run_id: str,
+    solved: bool | None = None,
+    hallucination: bool | None = None,
+    needs_rework: bool | None = None,
+    notes: str | None = None,
+    apply: bool = True,
+    source: str = "manual",
+) -> dict[str, Any]:
+    status = single_run_status(run_id, include_output_tail=True, tail_chars=4000)
+    metadata = read_metadata(safe_run_dir(run_id))
+    usage = estimate_run_usage(run_id)
+    scope = check_write_scope(run_id=run_id)
+    scan = secret_scan_run(run_id, include_diff=False)
+    failures = detect_failure_modes(run_id, status=status)
+    finished_success = (not status.get("active")) and status.get("status") == "succeeded"
+    solved_value = finished_success if solved is None else bool(solved)
+    hallucination_value = False if hallucination is None else bool(hallucination)
+    needs_rework_value = (not solved_value) if needs_rework is None else bool(needs_rework)
+    score = 100
+    if not solved_value:
+        score -= 35
+    if not finished_success:
+        score -= 15
+    if not scope.get("ok", True):
+        score -= 25
+    if scan.get("finding_count"):
+        score -= 30
+    if failures.get("flag_count"):
+        score -= min(25, int(failures.get("flag_count") or 0) * 8)
+    if hallucination_value:
+        score -= 25
+    if needs_rework_value:
+        score -= 15
+    if int(usage.get("total_tokens_est") or 0) > 50000:
+        score -= 10
+    score = max(0, min(100, score))
+    profile = metadata.get("profile") or {}
+    record = {
+        "recorded_at": utc_now_iso(),
+        "source": source,
+        "run_id": run_id,
+        "role": metadata.get("role"),
+        "profile": profile.get("name"),
+        "model": profile.get("model"),
+        "status": status.get("status"),
+        "quality_score": score,
+        "solved": solved_value,
+        "scope_ok": bool(scope.get("ok", True)),
+        "secret_ok": not bool(scan.get("finding_count")),
+        "failure_flags": failures.get("flags", []),
+        "hallucination": hallucination_value,
+        "needs_rework": needs_rework_value,
+        "tokens_est": usage.get("total_tokens_est"),
+        "notes": notes or "",
+    }
+    if apply:
+        history = load_worker_quality_history()
+        history.setdefault("records", []).append(record)
+        history["updated_at"] = utc_now_iso()
+        write_json_file(WORKER_QUALITY_HISTORY_PATH, history)
+        try:
+            build_model_registry(refresh=True, apply=True)
+        except Exception as exc:
+            record["registry_update_error"] = str(exc)
+    return {"ok": True, "applied": apply, "path": str(WORKER_QUALITY_HISTORY_PATH), **record}
+
+
+def daily_usage_summary(date: str | None = None, write_report: bool = False) -> dict[str, Any]:
+    target_date = date or datetime.now(timezone.utc).date().isoformat()
+    RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    runs: list[dict[str, Any]] = []
+    for path in RUNS_DIR.iterdir():
+        if not path.is_dir() or not RUN_ID_RE.match(path.name):
+            continue
+        try:
+            usage = estimate_run_usage(path.name)
+        except Exception:
+            continue
+        started = str(usage.get("started_at") or "")
+        if started.startswith(target_date):
+            runs.append(usage)
+    by_model: dict[str, dict[str, Any]] = {}
+    for item in runs:
+        model = str(item.get("model") or "unknown")
+        bucket = by_model.setdefault(model, {"runs": 0, "failures": 0, "duration_ms": 0, "tokens_est": 0})
+        bucket["runs"] += 1
+        if item.get("status") not in {"succeeded", "stopped"}:
+            bucket["failures"] += 1
+        bucket["duration_ms"] += int(item.get("duration_ms") or 0)
+        bucket["tokens_est"] += int(item.get("total_tokens_est") or 0)
+    result = {
+        "ok": True,
+        "date": target_date,
+        "run_count": len(runs),
+        "total_tokens_est": sum(int(item.get("total_tokens_est") or 0) for item in runs),
+        "total_duration_ms": sum(int(item.get("duration_ms") or 0) for item in runs),
+        "failure_count": sum(1 for item in runs if item.get("status") not in {"succeeded", "stopped"}),
+        "by_model": by_model,
+        "runs": runs,
+        "note": "Token counts are estimates from prompt/log characters; providers may bill differently.",
+    }
+    if write_report:
+        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        path = REPORTS_DIR / f"usage-{target_date}.md"
+        lines = ["# Daily Usage Summary", "", f"Date: `{target_date}`", "", f"- Runs: `{result['run_count']}`", f"- Estimated tokens: `{result['total_tokens_est']}`", f"- Failures: `{result['failure_count']}`", "", "## By Model"]
+        for model, bucket in by_model.items():
+            lines.append(f"- `{model}`: runs `{bucket['runs']}`, failures `{bucket['failures']}`, estimated tokens `{bucket['tokens_est']}`")
+        path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        result["report_path"] = str(path)
+    return result
+
+
+BENCHMARK_SUITE_TASKS = [
+    {"id": "code_fix", "role": "development", "task": "Fix this Python bug mentally and return only a short patch plan: def add(a,b): return a-b"},
+    {"id": "review", "role": "review", "task": "Review this change for risks: a CLI command now runs shell=True on user input. Return top 3 risks."},
+    {"id": "security", "role": "security", "task": "Find the secret-leak risks in logging provider env vars. Return concise findings."},
+    {"id": "long_context", "role": "architecture", "task": "Summarize a 5-module project architecture from noisy notes and name the highest-risk dependency boundary."},
+    {"id": "multimodal", "role": "multimodal", "task": "Plan how to inspect an image-driven UI task when an image is available. Do not require actual image input."},
+]
+
+
+def benchmark_suite(profile: str | None = None, execute: bool = False, timeout_seconds: int = 120) -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+    for task in BENCHMARK_SUITE_TASKS:
+        result = benchmark_model(profile=profile, role=task["role"], task=task["task"], timeout_seconds=timeout_seconds, execute=execute)
+        items.append({"id": task["id"], "role": task["role"], **result})
+    score = 0
+    if execute and items:
+        passed = sum(1 for item in items if item.get("ok"))
+        avg_speed_bonus = sum(max(0, 120000 - int(item.get("duration_ms") or 120000)) for item in items) / len(items) / 120000
+        score = round((passed / len(items)) * 85 + avg_speed_bonus * 15, 2)
+    result = {
+        "ok": all(item.get("ok", False) for item in items) if execute else True,
+        "dry_run": not execute,
+        "profile": profile,
+        "score": score if execute else None,
+        "tasks": items,
+        "note": "Dry run avoids spending model quota. Pass execute=true for real CCSwitch benchmark data.",
+    }
+    if execute:
+        append_model_benchmark_history({"recorded_at": utc_now_iso(), "type": "suite", **result})
+        build_model_registry(refresh=True, apply=True)
+    return result
+
+
+def load_queue() -> dict[str, Any]:
+    RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    if QUEUE_PATH.exists():
+        queue = json.loads(QUEUE_PATH.read_text(encoding="utf-8"))
+        for job in queue.get("jobs", []):
+            if job.get("status") == "pending":
+                job["status"] = "queued"
+        return queue
+    return {"created_at": utc_now_iso(), "updated_at": None, "jobs": []}
+
+
+def save_queue(queue: dict[str, Any]) -> None:
+    queue["updated_at"] = utc_now_iso()
+    QUEUE_PATH.write_text(json.dumps(queue, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_queue_policy() -> dict[str, Any]:
+    policy = read_json_file(QUEUE_POLICY_PATH, {})
+    defaults = {
+        "max_concurrent": 3,
+        "default_priority": 100,
+        "default_timeout_seconds": 900,
+        "retry_failed_read_only": 1,
+        "retry_write_enabled": 0,
+        "stop_timed_out": True,
+    }
+    defaults.update(policy if isinstance(policy, dict) else {})
+    return defaults
+
+
+def queue_policy(config: dict[str, Any] | None = None, apply: bool = False) -> dict[str, Any]:
+    current = load_queue_policy()
+    if config:
+        current.update(config)
+        current["updated_at"] = utc_now_iso()
+    if apply:
+        write_json_file(QUEUE_POLICY_PATH, current)
+    return {"ok": True, "applied": apply, "path": str(QUEUE_POLICY_PATH), "policy": current}
+
+
+def queue_submit(
+    task: str,
+    role: str = "implementation",
+    priority: int = 100,
+    cwd: Path | None = None,
+    context: str | None = None,
+    timeout_seconds: int | None = None,
+    max_retries: int = 0,
+    allow_write: bool = False,
+) -> dict[str, Any]:
+    if not task.strip():
+        raise OrchestratorError("Task cannot be empty.")
+    queue = load_queue()
+    policy = load_queue_policy()
+    job_id = "job-" + new_run_id()
+    effective_timeout = timeout_seconds or int(policy.get("default_timeout_seconds", 900))
+    effective_retries = max_retries
+    if max_retries == 0:
+        effective_retries = int(policy.get("retry_write_enabled" if allow_write else "retry_failed_read_only", 0))
+    job = {
+        "job_id": job_id,
+        "status": "queued",
+        "created_at": utc_now_iso(),
+        "updated_at": utc_now_iso(),
+        "priority": priority if priority is not None else int(policy.get("default_priority", 100)),
+        "task": task,
+        "role": role,
+        "cwd": str(cwd or Path.cwd()),
+        "context": context,
+        "timeout_seconds": effective_timeout,
+        "max_retries": effective_retries,
+        "attempts": 0,
+        "allow_write": allow_write,
+        "timeout_policy": "stop",
+        "retry_policy": "read_only_default" if not allow_write else "write_disabled_by_default",
+        "runs": [],
+    }
+    queue.setdefault("jobs", []).append(job)
+    save_queue(queue)
+    return {"ok": True, "job": job, "queue_path": str(QUEUE_PATH)}
+
+
+def refresh_queue_job(job: dict[str, Any]) -> dict[str, Any]:
+    if job.get("status") != "running" or not job.get("run_id"):
+        return job
+    status = single_run_status(str(job["run_id"]), include_output_tail=False)
+    started_age = _iso_age_seconds(str(job.get("started_at") or ""))
+    timeout = int(job.get("timeout_seconds") or 0)
+    if status.get("active") and timeout and started_age is not None and started_age > timeout:
+        stopped = stop_run(str(job["run_id"]), force=True)
+        job["status"] = "timed_out"
+        job["last_error"] = f"Queue timeout after {timeout}s; stop result: {stopped.get('status')}"
+        job["updated_at"] = utc_now_iso()
+        return job
+    if status.get("active"):
+        return job
+    if status.get("status") == "succeeded":
+        job["status"] = "succeeded"
+    elif status.get("status") == "timed_out":
+        job["status"] = "timed_out"
+        job["last_error"] = f"Run {job['run_id']} timed out."
+    elif int(job.get("attempts") or 0) <= int(job.get("max_retries") or 0) and not bool(job.get("allow_write", False)):
+        job["status"] = "queued"
+        job["last_error"] = f"Run {job['run_id']} ended as {status.get('status')}; retry queued."
+    else:
+        job["status"] = "failed"
+        job["last_error"] = f"Run {job['run_id']} ended as {status.get('status')}."
+    job["updated_at"] = utc_now_iso()
+    return job
+
+
+def queue_tick(max_concurrent: int | None = None) -> dict[str, Any]:
+    queue = load_queue()
+    jobs = [refresh_queue_job(job) for job in queue.get("jobs", [])]
+    active = run_status(include_finished=False).get("active_count", 0)
+    guard = load_cost_guard()
+    policy = load_queue_policy()
+    limit = max_concurrent if max_concurrent is not None else min(int(policy.get("max_concurrent", 3)), int(guard.get("max_concurrent", 4)))
+    slots = max(0, limit - int(active))
+    started: list[dict[str, Any]] = []
+    pending = sorted(
+        [job for job in jobs if job.get("status") == "queued"],
+        key=lambda item: (-int(item.get("priority") or 0), str(item.get("created_at") or "")),
+    )
+    for job in pending[:slots]:
+        run = run_streaming_agent(
+            task=str(job["task"]),
+            role=str(job.get("role") or "implementation"),
+            cwd=Path(str(job.get("cwd") or Path.cwd())),
+            context=job.get("context"),
+            timeout_seconds=job.get("timeout_seconds"),
+            allow_write=bool(job.get("allow_write", False)),
+        )
+        job["status"] = "running"
+        job["run_id"] = run["run_id"]
+        job["started_at"] = utc_now_iso()
+        job["attempts"] = int(job.get("attempts") or 0) + 1
+        job["updated_at"] = utc_now_iso()
+        job.setdefault("runs", []).append(run["run_id"])
+        started.append({"job_id": job["job_id"], "run_id": run["run_id"], "role": job.get("role")})
+    queue["jobs"] = jobs
+    save_queue(queue)
+    return {"ok": True, "queue_path": str(QUEUE_PATH), "max_concurrent": limit, "slots_used": len(started), "started": started, "jobs": jobs}
+
+
+def queue_status(include_finished: bool = True) -> dict[str, Any]:
+    queue = load_queue()
+    all_jobs = [refresh_queue_job(job) for job in queue.get("jobs", [])]
+    queue["jobs"] = all_jobs
+    save_queue(queue)
+    jobs = all_jobs
+    if not include_finished:
+        jobs = [job for job in all_jobs if job.get("status") in {"queued", "running"}]
+    counts: dict[str, int] = {}
+    for job in all_jobs:
+        counts[str(job.get("status") or "unknown")] = counts.get(str(job.get("status") or "unknown"), 0) + 1
+    return {"ok": True, "queue_path": str(QUEUE_PATH), "policy": load_queue_policy(), "count": len(jobs), "state_counts": counts, "jobs": jobs}
+
+
+def queue_cancel(job_id: str) -> dict[str, Any]:
+    if not QUEUE_JOB_ID_RE.match(job_id):
+        raise OrchestratorError(f"Invalid queue job id: {job_id}")
+    queue = load_queue()
+    for job in queue.get("jobs", []):
+        if job.get("job_id") != job_id:
+            continue
+        if job.get("status") == "running" and job.get("run_id"):
+            stop_run(str(job["run_id"]), force=True)
+        job["status"] = "cancelled"
+        job["updated_at"] = utc_now_iso()
+        save_queue(queue)
+        return {"ok": True, "job": job}
+    raise OrchestratorError(f"Queue job not found: {job_id}")
+
+
+def read_version() -> dict[str, Any]:
+    data = read_json_file(VERSION_PATH, {})
+    if not data:
+        data = {"version": "0.0.0", "schema_version": 1}
+    return data
+
+
+def upgrade_check(apply: bool = False) -> dict[str, Any]:
+    version = read_version()
+    state = read_json_file(VERSION_STATE_PATH, {})
+    preserve_files = [
+        CALIBRATION_PATH,
+        COST_GUARD_PATH,
+        LOCAL_POLICY_OVERRIDE_PATH,
+        MODEL_REGISTRY_PATH,
+        MODEL_BENCHMARK_HISTORY_PATH,
+        WORKER_QUALITY_HISTORY_PATH,
+        QUEUE_POLICY_PATH,
+        VERSION_STATE_PATH,
+    ]
+    preserved: list[dict[str, Any]] = []
+    for path in preserve_files:
+        item = {"path": str(path), "exists": path.exists()}
+        if path.exists():
+            item.update(file_sha256(path))
+        preserved.append(item)
+    actions = []
+    if state.get("current_version") != version.get("version"):
+        actions.append({"type": "version_state_update", "from": state.get("current_version"), "to": version.get("version")})
+    if CALIBRATION_PATH.exists():
+        actions.append({"type": "preserve_local_model_calibration", "path": str(CALIBRATION_PATH)})
+    if COST_GUARD_PATH.exists():
+        actions.append({"type": "preserve_cost_guard", "path": str(COST_GUARD_PATH)})
+    if LOCAL_POLICY_OVERRIDE_PATH.exists():
+        actions.append({"type": "preserve_local_policy_override", "path": str(LOCAL_POLICY_OVERRIDE_PATH)})
+    if MODEL_REGISTRY_PATH.exists():
+        actions.append({"type": "preserve_model_registry", "path": str(MODEL_REGISTRY_PATH)})
+    if WORKER_QUALITY_HISTORY_PATH.exists():
+        actions.append({"type": "preserve_worker_quality_history", "path": str(WORKER_QUALITY_HISTORY_PATH)})
+    if apply:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        new_state = {
+            "updated_at": utc_now_iso(),
+            "current_version": version.get("version"),
+            "schema_version": version.get("schema_version", 1),
+            "previous_state": state or None,
+            "preserved_files": preserved,
+        }
+        VERSION_STATE_PATH.write_text(json.dumps(new_state, ensure_ascii=False, indent=2), encoding="utf-8")
+        preserved = []
+        for path in preserve_files:
+            item = {"path": str(path), "exists": path.exists()}
+            if path.exists():
+                item.update(file_sha256(path))
+            preserved.append(item)
+    return {
+        "ok": True,
+        "applied": apply,
+        "version": version,
+        "state_path": str(VERSION_STATE_PATH),
+        "previous_state": state,
+        "actions": actions,
+        "preserved_files": preserved,
+        "note": "Local calibration, overrides, model registry, quality history, queue policy, and cost guard files are user-owned and should survive upgrades.",
+    }
+
+
+def write_fake_claude_launcher(directory: Path) -> Path:
+    script = directory / "fake_claude.py"
+    script.write_text(
+        "\n".join(
+            [
+                "import json, os, sys, time",
+                "steps = int(os.environ.get('CC_ORCHESTRATOR_FAKE_STEPS', '4'))",
+                "delay = float(os.environ.get('CC_ORCHESTRATOR_FAKE_DELAY', '0.05'))",
+                "print(json.dumps({'type':'system','subtype':'init','cwd':os.getcwd()}), flush=True)",
+                "for i in range(steps):",
+                "    print(json.dumps({'type':'assistant','phase':f'mock-step-{i}','message':{'content':[{'type':'text','text':f'mock step {i}'}]}}), flush=True)",
+                "    time.sleep(delay)",
+                "print(json.dumps({'type':'result','subtype':'success','result':'mock complete'}), flush=True)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    if os.name == "nt":
+        launcher = directory / "fake-claude.cmd"
+        launcher.write_text(f"@echo off\r\n\"{sys.executable}\" \"{script}\" %*\r\n", encoding="utf-8")
+    else:
+        launcher = directory / "fake-claude"
+        launcher.write_text(f"#!/usr/bin/env sh\nexec \"{sys.executable}\" \"{script}\" \"$@\"\n", encoding="utf-8")
+        launcher.chmod(0o755)
+    return launcher
+
+
+def mock_stream_test(timeout_seconds: int = 20) -> dict[str, Any]:
+    gates: dict[str, bool] = {}
+    details: dict[str, Any] = {}
+    old_bin = os.environ.get("CLAUDE_CODE_BIN")
+    old_steps = os.environ.get("CC_ORCHESTRATOR_FAKE_STEPS")
+    old_delay = os.environ.get("CC_ORCHESTRATOR_FAKE_DELAY")
+    mock_parent = Path(os.environ.get("PROGRAMDATA") or "C:/ProgramData") / "cc-orchestrator-mock"
+    mock_dir = mock_parent / uuid.uuid4().hex[:12]
+    mock_dir.mkdir(parents=True, exist_ok=False)
+    try:
+        launcher = write_fake_claude_launcher(mock_dir)
+        os.environ["CLAUDE_CODE_BIN"] = str(launcher)
+        try:
+            os.environ["CC_ORCHESTRATOR_FAKE_STEPS"] = "4"
+            os.environ["CC_ORCHESTRATOR_FAKE_DELAY"] = "0.05"
+            finish_run = run_streaming_agent("mock finish test", role="testing", timeout_seconds=timeout_seconds)
+            deadline = time.time() + timeout_seconds
+            finish_poll: dict[str, Any] = {}
+            while time.time() < deadline:
+                finish_poll = poll_run(finish_run["run_id"], include_output_tail=True)
+                status_name = finish_poll["status"].get("status")
+                if (not finish_poll["status"].get("active")) and status_name in {"succeeded", "failed", "timed_out", "stopped"}:
+                    break
+                time.sleep(0.1)
+            gates["finish_run_succeeded"] = finish_poll.get("status", {}).get("status") == "succeeded"
+            gates["events_ndjson_written"] = int(finish_poll.get("events", {}).get("size") or 0) > 0
+            gates["poll_returned_events"] = bool(finish_poll.get("events", {}).get("items"))
+
+            os.environ["CC_ORCHESTRATOR_FAKE_STEPS"] = "200"
+            os.environ["CC_ORCHESTRATOR_FAKE_DELAY"] = "0.1"
+            stop_run_data = run_streaming_agent("mock stop test", role="testing", timeout_seconds=60)
+            before_stop = {}
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                before_stop = run_status(run_id=stop_run_data["run_id"])
+                if before_stop.get("active"):
+                    break
+                time.sleep(0.1)
+            stopped = stop_run(stop_run_data["run_id"], force=True)
+            after_stop = run_status(run_id=stop_run_data["run_id"])
+            gates["status_saw_active_worker"] = bool(before_stop.get("active"))
+            gates["stop_run_stopped_worker"] = bool(stopped.get("stopped")) or not bool(after_stop.get("active"))
+            gates["status_after_stop_inactive"] = not bool(after_stop.get("active"))
+            details = {
+                "finish_run_id": finish_run["run_id"],
+                "finish_poll": finish_poll,
+                "stop_run_id": stop_run_data["run_id"],
+                "before_stop": before_stop,
+                "stop_result": stopped,
+                "after_stop": after_stop,
+            }
+        finally:
+            if old_bin is None:
+                os.environ.pop("CLAUDE_CODE_BIN", None)
+            else:
+                os.environ["CLAUDE_CODE_BIN"] = old_bin
+            if old_steps is None:
+                os.environ.pop("CC_ORCHESTRATOR_FAKE_STEPS", None)
+            else:
+                os.environ["CC_ORCHESTRATOR_FAKE_STEPS"] = old_steps
+            if old_delay is None:
+                os.environ.pop("CC_ORCHESTRATOR_FAKE_DELAY", None)
+            else:
+                os.environ["CC_ORCHESTRATOR_FAKE_DELAY"] = old_delay
+    finally:
+        shutil.rmtree(mock_dir, ignore_errors=True)
+    return {"ok": all(gates.values()), "gates": gates, "details": details}
 
 
 def run_visible_agent(
@@ -2329,6 +3814,8 @@ def selftest() -> dict[str, Any]:
     except OrchestratorError:
         run_id_rejected = True
     worker_env = build_worker_env({"ANTHROPIC_API_KEY": sample_api_key})
+    secret_findings = secret_scan_text("OPENAI_API_KEY=sk-" + ("1" * 32), "selftest")
+    false_findings = secret_scan_text("input_tokens = estimate_tokens_from_text(prompt)", "selftest")
     checks = {
         "utf8_env": env.get("PYTHONIOENCODING") == "utf-8" and env.get("PYTHONUTF8") == "1",
         "timeout_bytes_decode": decoded == "中文✅",
@@ -2336,8 +3823,11 @@ def selftest() -> dict[str, Any]:
         "agents_exists": AGENTS_PATH.exists(),
         "claude_md_template": "Assigned role: review" in claude_md and CLAUDE_MD_MARKER_BEGIN in claude_md,
         "secret_redaction": sample_github_token not in redacted and sample_api_key not in redacted,
+        "secret_scan_detects_assignment": bool(secret_findings),
+        "secret_scan_ignores_token_words": not false_findings,
         "run_id_validation": run_id_rejected,
         "worker_env_allowlist": "ANTHROPIC_API_KEY" in worker_env and "GITHUB_TOKEN" not in worker_env and "NPM_TOKEN" not in worker_env,
+        "mock_env_allowlist": "CC_ORCHESTRATOR_FAKE_STEPS" in PASSTHROUGH_ENV_KEYS,
     }
     return {
         "ok": all(checks.values()),
@@ -2397,6 +3887,34 @@ def parse_key_values(items: list[str] | None) -> dict[str, str]:
     return result
 
 
+def list_prompt_pack() -> dict[str, Any]:
+    if not PROMPT_PACK_DIR.exists():
+        return {"ok": False, "path": str(PROMPT_PACK_DIR), "templates": [], "error": "Prompt pack directory not found."}
+    templates = []
+    for path in sorted(PROMPT_PACK_DIR.glob("*.md")):
+        if path.name.lower() == "readme.md":
+            continue
+        first_line = path.read_text(encoding="utf-8", errors="replace").splitlines()[0:1]
+        templates.append({"name": path.stem, "path": str(path), "title": first_line[0].lstrip("# ").strip() if first_line else path.stem})
+    return {"ok": True, "path": str(PROMPT_PACK_DIR), "templates": templates}
+
+
+def render_prompt_template(template: str, task: str = "", variables: dict[str, Any] | None = None) -> dict[str, Any]:
+    if not re.match(r"^[A-Za-z0-9_\-]+$", template):
+        raise OrchestratorError(f"Invalid prompt template name: {template}")
+    path = PROMPT_PACK_DIR / f"{template}.md"
+    if not path.exists():
+        available = ", ".join(item["name"] for item in list_prompt_pack().get("templates", []))
+        raise OrchestratorError(f"Prompt template not found: {template}. Available: {available}")
+    values = {str(k): str(v) for k, v in (variables or {}).items()}
+    values.setdefault("task", task)
+    values.setdefault("write_scope", "No write scope provided. Default to read-only.")
+    text = path.read_text(encoding="utf-8")
+    for key, value in values.items():
+        text = text.replace("{{" + key + "}}", value)
+    return {"ok": True, "template": template, "path": str(path), "prompt": text}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Claude Code orchestrator backed by CCSwitch.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -2433,6 +3951,23 @@ def main() -> int:
     poll.add_argument("--max-bytes", type=int, default=20000)
     poll.add_argument("--tail-chars", type=int, default=4000)
     poll.add_argument("--no-output-tail", action="store_true")
+    poll.add_argument("--mode", choices=["raw", "controller"], default="controller")
+    poll.add_argument("--max-events", type=int, default=20)
+    poll.add_argument("--max-summary-chars", type=int, default=2000)
+    poll.add_argument("--write-artifacts", action="store_true")
+    summarize_cmd = sub.add_parser("summarize-run")
+    summarize_cmd.add_argument("--run-id", required=True)
+    summarize_cmd.add_argument("--event-offset", type=int, default=0)
+    summarize_cmd.add_argument("--max-bytes", type=int, default=20000)
+    summarize_cmd.add_argument("--max-events", type=int, default=20)
+    summarize_cmd.add_argument("--max-summary-chars", type=int, default=2000)
+    summarize_cmd.add_argument("--no-write-artifacts", action="store_true")
+    compact_cmd = sub.add_parser("compact-events")
+    compact_cmd.add_argument("--run-id", required=True)
+    compact_cmd.add_argument("--event-offset", type=int, default=0)
+    compact_cmd.add_argument("--max-bytes", type=int, default=20000)
+    compact_cmd.add_argument("--max-events", type=int, default=20)
+    compact_cmd.add_argument("--write-artifacts", action="store_true")
     stop = sub.add_parser("stop-run")
     stop.add_argument("--run-id", required=True)
     stop.add_argument("--force", action="store_true")
@@ -2470,6 +4005,9 @@ def main() -> int:
     scope.add_argument("--allow", action="append", dest="allowed_paths")
     scope.add_argument("--deny", action="append", dest="denied_paths")
     scope.add_argument("--max-diff-lines", type=int, default=800)
+    check_scope = sub.add_parser("check-write-scope")
+    check_scope.add_argument("--run-id")
+    check_scope.add_argument("--cwd")
     diff_summary_cmd = sub.add_parser("diff-summary")
     diff_summary_cmd.add_argument("--cwd")
     secret_scan = sub.add_parser("secret-scan-run")
@@ -2478,12 +4016,21 @@ def main() -> int:
     rollback = sub.add_parser("rollback-run")
     rollback.add_argument("--run-id", required=True)
     rollback.add_argument("--confirm", action="store_true")
+    verify = sub.add_parser("verify-run")
+    verify.add_argument("--run-id", required=True)
+    verify.add_argument("--test-command", action="append", dest="test_commands")
+    verify.add_argument("--test-timeout-seconds", type=int, default=300)
+    verify.add_argument("--no-diff", action="store_true")
     bench = sub.add_parser("benchmark-model")
     bench.add_argument("--profile")
     bench.add_argument("--role", default="testing")
     bench.add_argument("--task", default="Return a concise JSON object with keys ok and summary.")
     bench.add_argument("--timeout-seconds", type=int, default=120)
     bench.add_argument("--execute", action="store_true")
+    bench_suite = sub.add_parser("benchmark-suite")
+    bench_suite.add_argument("--profile")
+    bench_suite.add_argument("--timeout-seconds", type=int, default=120)
+    bench_suite.add_argument("--execute", action="store_true")
     calibrate = sub.add_parser("calibrate-policy")
     calibrate.add_argument("--preferences-json", default="{}")
     calibrate.add_argument("--preference", action="append", dest="preferences")
@@ -2493,8 +4040,57 @@ def main() -> int:
     guard.add_argument("--max-concurrent", type=int)
     guard.add_argument("--max-timeout-seconds", type=int)
     guard.add_argument("--apply", action="store_true")
+    usage = sub.add_parser("usage-summary")
+    usage.add_argument("--date")
+    usage.add_argument("--write-report", action="store_true")
+    queue_submit_cmd = sub.add_parser("queue-submit")
+    queue_submit_cmd.add_argument("task")
+    queue_submit_cmd.add_argument("--role", default="implementation")
+    queue_submit_cmd.add_argument("--priority", type=int, default=100)
+    queue_submit_cmd.add_argument("--cwd")
+    queue_submit_cmd.add_argument("--context")
+    queue_submit_cmd.add_argument("--timeout-seconds", type=int)
+    queue_submit_cmd.add_argument("--max-retries", type=int, default=0)
+    queue_submit_cmd.add_argument("--allow-write", action="store_true")
+    queue_tick_cmd = sub.add_parser("queue-tick")
+    queue_tick_cmd.add_argument("--max-concurrent", type=int)
+    queue_status_cmd = sub.add_parser("queue-status")
+    queue_status_cmd.add_argument("--active-only", action="store_true")
+    queue_cancel_cmd = sub.add_parser("queue-cancel")
+    queue_cancel_cmd.add_argument("--job-id", required=True)
+    queue_policy_cmd = sub.add_parser("queue-policy")
+    queue_policy_cmd.add_argument("--config-json", default="{}")
+    queue_policy_cmd.add_argument("--max-concurrent", type=int)
+    queue_policy_cmd.add_argument("--default-timeout-seconds", type=int)
+    queue_policy_cmd.add_argument("--apply", action="store_true")
+    registry_cmd = sub.add_parser("model-registry")
+    registry_cmd.add_argument("--refresh", action="store_true")
+    registry_cmd.add_argument("--apply", action="store_true")
+    local_policy_cmd = sub.add_parser("local-policy")
+    local_policy_cmd.add_argument("--config-json", default="{}")
+    local_policy_cmd.add_argument("--preference", action="append", dest="preferences")
+    local_policy_cmd.add_argument("--show", action="store_true")
+    local_policy_cmd.add_argument("--apply", action="store_true")
+    score_worker_cmd = sub.add_parser("score-worker")
+    score_worker_cmd.add_argument("--run-id", required=True)
+    score_worker_cmd.add_argument("--solved", choices=["true", "false"])
+    score_worker_cmd.add_argument("--hallucination", choices=["true", "false"])
+    score_worker_cmd.add_argument("--needs-rework", choices=["true", "false"])
+    score_worker_cmd.add_argument("--notes")
+    score_worker_cmd.add_argument("--no-apply", action="store_true")
+    prompt_pack_cmd = sub.add_parser("prompt-pack")
+    prompt_pack_cmd.add_argument("--list", action="store_true")
+    render_prompt_cmd = sub.add_parser("render-prompt")
+    render_prompt_cmd.add_argument("--template", required=True)
+    render_prompt_cmd.add_argument("--task", default="")
+    render_prompt_cmd.add_argument("--var", action="append", dest="variables")
+    upgrade = sub.add_parser("upgrade-check")
+    upgrade.add_argument("--apply", action="store_true")
+    mock = sub.add_parser("mock-stream-test")
+    mock.add_argument("--timeout-seconds", type=int, default=20)
     dash = sub.add_parser("dashboard")
     dash.add_argument("--include-finished", action="store_true")
+    dash.add_argument("--active-only", action="store_true")
     dash.add_argument("--limit", type=int, default=30)
     dash.add_argument("--open", action="store_true")
     open_folder = sub.add_parser("open-run-folder")
@@ -2577,8 +4173,25 @@ def main() -> int:
                     max_bytes=args.max_bytes,
                     include_output_tail=not args.no_output_tail,
                     tail_chars=args.tail_chars,
+                    mode=args.mode,
+                    max_events=args.max_events,
+                    max_summary_chars=args.max_summary_chars,
+                    write_artifacts=args.write_artifacts,
                 )
             )
+        elif args.command == "summarize-run":
+            print_json(
+                summarize_run(
+                    run_id=args.run_id,
+                    event_offset=args.event_offset,
+                    max_bytes=args.max_bytes,
+                    max_events=args.max_events,
+                    max_summary_chars=args.max_summary_chars,
+                    write_artifacts=not args.no_write_artifacts,
+                )
+            )
+        elif args.command == "compact-events":
+            print_json(compact_events(run_id=args.run_id, event_offset=args.event_offset, max_bytes=args.max_bytes, max_events=args.max_events, write_artifacts=args.write_artifacts))
         elif args.command == "stop-run":
             print_json(stop_run(run_id=args.run_id, force=args.force, timeout_seconds=args.timeout_seconds))
         elif args.command == "run-status":
@@ -2632,12 +4245,23 @@ def main() -> int:
                     max_diff_lines=args.max_diff_lines,
                 )
             )
+        elif args.command == "check-write-scope":
+            print_json(check_write_scope(run_id=args.run_id, cwd=Path(args.cwd) if args.cwd else None))
         elif args.command == "diff-summary":
             print_json(diff_summary(cwd=Path(args.cwd) if args.cwd else None))
         elif args.command == "secret-scan-run":
             print_json(secret_scan_run(args.run_id, include_diff=not args.no_diff))
         elif args.command == "rollback-run":
             print_json(rollback_run(args.run_id, confirm=args.confirm))
+        elif args.command == "verify-run":
+            print_json(
+                verify_run(
+                    run_id=args.run_id,
+                    test_commands=args.test_commands,
+                    test_timeout_seconds=args.test_timeout_seconds,
+                    include_diff=not args.no_diff,
+                )
+            )
         elif args.command == "benchmark-model":
             print_json(
                 benchmark_model(
@@ -2648,6 +4272,8 @@ def main() -> int:
                     execute=args.execute,
                 )
             )
+        elif args.command == "benchmark-suite":
+            print_json(benchmark_suite(profile=args.profile, execute=args.execute, timeout_seconds=args.timeout_seconds))
         elif args.command == "calibrate-policy":
             preferences = parse_json_arg(args.preferences_json)
             preferences.update(parse_key_values(args.preferences))
@@ -2659,8 +4285,55 @@ def main() -> int:
             if args.max_timeout_seconds is not None:
                 guard_config["max_timeout_seconds"] = args.max_timeout_seconds
             print_json(cost_guard(guard_config, apply=args.apply))
+        elif args.command == "usage-summary":
+            print_json(daily_usage_summary(date=args.date, write_report=args.write_report))
+        elif args.command == "queue-submit":
+            print_json(
+                queue_submit(
+                    task=args.task,
+                    role=args.role,
+                    priority=args.priority,
+                    cwd=Path(args.cwd) if args.cwd else None,
+                    context=args.context,
+                    timeout_seconds=args.timeout_seconds,
+                    max_retries=args.max_retries,
+                    allow_write=args.allow_write,
+                )
+            )
+        elif args.command == "queue-tick":
+            print_json(queue_tick(max_concurrent=args.max_concurrent))
+        elif args.command == "queue-status":
+            print_json(queue_status(include_finished=not args.active_only))
+        elif args.command == "queue-cancel":
+            print_json(queue_cancel(args.job_id))
+        elif args.command == "queue-policy":
+            policy_config = parse_json_arg(args.config_json)
+            if args.max_concurrent is not None:
+                policy_config["max_concurrent"] = args.max_concurrent
+            if args.default_timeout_seconds is not None:
+                policy_config["default_timeout_seconds"] = args.default_timeout_seconds
+            print_json(queue_policy(policy_config, apply=args.apply))
+        elif args.command == "model-registry":
+            print_json(build_model_registry(refresh=args.refresh or True, apply=args.apply))
+        elif args.command == "local-policy":
+            local_config = parse_json_arg(args.config_json)
+            prefs = parse_key_values(args.preferences)
+            if prefs:
+                local_config.setdefault("preferred_models", {}).update(prefs)
+            print_json(local_policy_override(local_config, apply=args.apply))
+        elif args.command == "score-worker":
+            to_bool = lambda value: None if value is None else value == "true"
+            print_json(score_worker(args.run_id, solved=to_bool(args.solved), hallucination=to_bool(args.hallucination), needs_rework=to_bool(args.needs_rework), notes=args.notes, apply=not args.no_apply))
+        elif args.command == "prompt-pack":
+            print_json(list_prompt_pack())
+        elif args.command == "render-prompt":
+            print_json(render_prompt_template(args.template, task=args.task, variables=parse_key_values(args.variables)))
+        elif args.command == "upgrade-check":
+            print_json(upgrade_check(apply=args.apply))
+        elif args.command == "mock-stream-test":
+            print_json(mock_stream_test(timeout_seconds=args.timeout_seconds))
         elif args.command == "dashboard":
-            print_json(dashboard(include_finished=args.include_finished, limit=args.limit, open_browser=args.open))
+            print_json(dashboard(include_finished=(args.include_finished or not args.active_only), limit=args.limit, open_browser=args.open))
         elif args.command == "open-run-folder":
             print_json(open_run_folder(args.run_id, open_folder=not args.no_open))
         elif args.command == "export-report":
