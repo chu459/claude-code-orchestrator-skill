@@ -2,6 +2,12 @@
 
 This page tracks the public docs-facing history of Claude Code Orchestrator Skill.
 
+## v0.6.3 - Docs deploy stability
+
+- Fixed the GitHub Actions docs deploy secret-scan false positive caused by a selftest placeholder token.
+- Kept placeholder-secret regression coverage while splitting the sample token string so repository scans do not flag it as a real key.
+- Synced README, docs changelog, package metadata, and version metadata for the hotfix.
+
 ## v0.6.2 - Actual model attribution
 
 - Fixed #15 by recording Claude stream `modelUsage` as `actual_model_usage`.

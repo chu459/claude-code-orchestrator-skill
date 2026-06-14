@@ -2,6 +2,12 @@
 
 这里记录 Claude Code Orchestrator Skill 的主要版本变化。
 
+## v0.6.3 - 文档部署稳定性
+
+- 修复 GitHub Actions 文档部署里的密钥扫描误报。
+- 保留占位密钥回归测试，但把样例 token 拆成字符串拼接，避免仓库级扫描误判为真实 key。
+- 同步 README、文档站 changelog、package 元数据和 version 元数据。
+
 ## v0.6.2 - 实际模型归因
 
 - 修复 #15：把 Claude stream 里的 `modelUsage` 保存为 `actual_model_usage`。

@@ -15,7 +15,7 @@
 <p align="center">
   <a href="README.zh-CN.md"><img alt="README: 中文" src="https://img.shields.io/badge/README-中文-red"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-brightgreen"></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-v0.6.2-black">
+  <img alt="Version" src="https://img.shields.io/badge/version-v0.6.3-black">
   <img alt="Codex Skill" src="https://img.shields.io/badge/Codex-Skill-0A0A0A">
   <img alt="MCP Included" src="https://img.shields.io/badge/MCP-Included-blue">
   <img alt="CCSwitch" src="https://img.shields.io/badge/CCSwitch-Model_Router-purple">
@@ -60,11 +60,12 @@ This is a miniature cost-management operating system for multi-agent coding.
 <h2 align="center">Latest Updates</h2>
 
 <p align="center">
-  <b>Current version: v0.6.2</b>
+  <b>Current version: v0.6.3</b>
 </p>
 
 | Version | What changed | Why it matters |
 | --- | --- | --- |
+| `v0.6.3` | Fixed the GitHub Actions docs deploy secret-scan false positive by splitting placeholder test tokens in selftest code. | The public docs pipeline can publish v0.6.x without mistaking safe placeholder examples for real credentials. |
 | `v0.6.2` | Fixed #15: Claude stream `modelUsage` is captured as `actual_model_usage`; metadata, dashboard, usage summary, and controller reports now distinguish declared route from actual billed model and flag `route_mismatch`. Added `supervise-decision` as a compatibility alias for `decision-review`. | Codex can now catch the painful case where a worker says it used one model but Claude actually bills another. The controller sees the real model, real usage, and mismatch risk. |
 | `v0.6.1` | Completed the GitHub issue audit pass: controller reports now include by-model totals, per-run duration, token estimates, stdout/events bytes, warning/blocking counts, and dashboard token estimates; legacy metadata writes now use the same UTF-8/control-character sanitizer. | The closed issues now have stronger evidence, not just feature names. Codex can hand you a report that is actually enough to judge worker health without opening raw logs. |
 | `v0.6.0` | Fixed GitHub issues #3-#12: transactional role-team launches, hard output/event budgets, final-only mode, route-preserving follow-ups, Windows UTF-8 checks, risk severity split, secret finding classification, source-vs-artifact diff summaries, operations dashboard, controller pressure reports, and supervisor decision review. | Codex can now manage Claude Code workers like a real controller: start teams without leaving silent workers behind, stop runaway output, preserve the chosen model, audit risk with clearer signals, and export acceptance evidence. |
@@ -77,6 +78,15 @@ This is a miniature cost-management operating system for multi-agent coding.
 | `v0.1.0` | Built the first Skill + MCP + CLI foundation with CCSwitch profile discovery, model scoring, role routing, `CLAUDE.md` generation, visible Claude Code windows, logs, and safe defaults. | Proved the core idea: Codex is the brain, Claude Code is the worker layer, CCSwitch is the local model router. |
 
 <h3 align="center">Detailed Version Notes</h3>
+
+<details open>
+<summary><b>v0.6.3 - Docs Deploy Stability</b></summary>
+
+- Fixed a GitHub Actions secret-scan false positive in selftest placeholder-token coverage.
+- Kept the placeholder-secret regression test, but split the sample token string so repository-level scans do not treat it as a real key.
+- Published the fix as a documented hotfix so README, docs changelog, package metadata, and version metadata stay aligned.
+
+</details>
 
 <details open>
 <summary><b>v0.6.2 - Actual Model Attribution</b></summary>

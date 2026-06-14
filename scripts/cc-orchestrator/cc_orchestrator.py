@@ -5794,7 +5794,7 @@ def selftest() -> dict[str, Any]:
         run_id_rejected = True
     worker_env = build_worker_env({"ANTHROPIC_API_KEY": sample_api_key})
     secret_findings = secret_scan_text("OPENAI_API_KEY=sk-" + ("1" * 32), "selftest")
-    placeholder_findings = secret_scan_text("OPENAI_API_KEY=sk-your-placeholder-token", ".env.example")
+    placeholder_findings = secret_scan_text("OPENAI_API_KEY=" + "sk-" + "your-placeholder-token", ".env.example")
     false_findings = secret_scan_text("input_tokens = estimate_tokens_from_text(prompt)", "selftest")
     warning_risks = risk_summary([{"code": "soft_output", "severity": "medium", "blocking": False, "message": "warning only"}])
     actual_route = actual_route_from_payload(
