@@ -24,7 +24,7 @@
   <a href="README.md"><img alt="Language: English" src="https://img.shields.io/badge/README-English-black"></a>
   <a href="README.md"><img alt="Default README: English" src="https://img.shields.io/badge/Default-English-blue"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-brightgreen"></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-v0.6.3-black">
+  <img alt="Version" src="https://img.shields.io/badge/version-v0.6.4-black">
   <img alt="Codex Skill" src="https://img.shields.io/badge/Codex-Skill-0A0A0A">
   <img alt="MCP Included" src="https://img.shields.io/badge/MCP-Included-blue">
   <img alt="CCSwitch" src="https://img.shields.io/badge/CCSwitch-Model_Router-purple">
@@ -80,11 +80,12 @@ Skill = Codex 的操作说明书
 <h2 align="center">更新日志</h2>
 
 <p align="center">
-  <b>当前版本：v0.6.3</b>
+  <b>当前版本：v0.6.4</b>
 </p>
 
 | 版本 | 更新内容 | 为什么重要 |
 | --- | --- | --- |
+| `v0.6.4` | 修复 GitHub issues #16、#17、#18：`final-only` 先过滤 raw stream 噪声再计算持久 stdout 预算；`--cwd` run 使用目标 cwd 自己的 artifact root，并用 run index 保证后续 poll；真实 token 聚合从 raw `modelUsage` 先计算，再做脱敏。 | Codex 现在有可验证的数据证据：短任务不会被 thinking/system 噪声提前打死，多个项目的 agent 产物不会串目录，usage/dashboard 也不会再显示假的 0 token。 |
 | `v0.6.3` | 修复 GitHub Actions 文档部署里的密钥扫描误报：selftest 里的占位 token 样例改成拆分字符串。 | 文档站可以正常发布 v0.6.x，不会把安全的占位示例误判成真实密钥。 |
 | `v0.6.2` | 修复 #15：捕获 Claude stream 里的 `modelUsage`，写成 `actual_model_usage`；metadata、dashboard、usage summary、控制报告都会区分“声明路由模型”和“实际计费模型”，并标出 `route_mismatch`。新增 `supervise-decision`，作为 `decision-review` 的兼容别名。 | Codex 现在能发现“看起来派了 A 模型，实际 Claude 用了 B 模型”的坑。路由、账单、报告都更可信。 |
 | `v0.6.1` | 完成 GitHub issue 审核补丁：控制报告补齐按模型统计、每个 run 的耗时、token 估算、stdout/events 字节、warning/blocking 计数；dashboard 增加 token 估算；旧 metadata 写入也统一走 UTF-8/控制字符清洗。 | 这些 issue 不是“看起来关了”，而是能拿出更完整的验收证据。Codex 不用翻 raw 日志，也能判断 worker 到底跑得好不好。 |
@@ -98,6 +99,19 @@ Skill = Codex 的操作说明书
 | `v0.1.0` | 完成 Skill + MCP + CLI 基座：CCSwitch 发现、模型评分、角色路由、`CLAUDE.md` 生成、可视 Claude Code 窗口、日志和安全默认值。 | 证明核心思路：Codex 当大脑，Claude Code 当执行层，CCSwitch 当本地模型路由器。 |
 
 <h3 align="center">详细版本说明</h3>
+
+<details open>
+<summary><b>v0.6.4 - 用数据验证的 worker 管控修复</b></summary>
+
+- 修复 #16：`--final-only` 会先过滤 raw stream 事件，再计算持久 stdout 预算。
+- 修复 #16：final-only stdout 只写紧凑最终结果，不再写 raw `system` / `assistant` stream JSON。
+- 修复 #17：`run`、`run-streaming`、`run-visible` 会使用 `--cwd` 对应 workspace 下的 `.agent-workspace/claude-code-orchestrator`。
+- 修复 #17：新增 run index，让 `poll-run`、`run-status`、`stop-run`、`last-run` 和统计报告仍能通过 run id 找到 cwd-scoped run。
+- 修复 #18：真实 token 聚合从 raw Claude `modelUsage` 先计算，再写入脱敏后的日志和事件。
+- Windows PID 检测从慢 `tasklist` 改为系统 API。
+- `mock-stream-test` 新增 final-only 噪声过滤、cwd 产物路由、token 聚合保留三组数据 gate。
+
+</details>
 
 <details open>
 <summary><b>v0.6.3 - 文档部署稳定性</b></summary>

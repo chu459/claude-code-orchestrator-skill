@@ -2,6 +2,15 @@
 
 这里记录 Claude Code Orchestrator Skill 的主要版本变化。
 
+## v0.6.4 - 用数据验证的 worker 管控修复
+
+- 修复 GitHub issues #16、#17、#18。
+- `--final-only` 会先过滤 raw stream 噪声，再计算持久 stdout 预算，并只写紧凑最终结果。
+- `run`、`run-streaming`、`run-visible` 会使用 `--cwd` 对应的 artifact root，并通过 run index 保证控制器还能按 run id 找到日志。
+- 真实 token 聚合会先从 raw Claude `modelUsage` 计算，再做脱敏。
+- Windows PID 检测从慢 `tasklist` 改为系统 API。
+- `mock-stream-test` 新增 final-only 噪声过滤、cwd 产物路由、token 聚合保留三组 gate。
+
 ## v0.6.3 - 文档部署稳定性
 
 - 修复 GitHub Actions 文档部署里的密钥扫描误报。

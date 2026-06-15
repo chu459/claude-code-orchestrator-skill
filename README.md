@@ -15,7 +15,7 @@
 <p align="center">
   <a href="README.zh-CN.md"><img alt="README: 中文" src="https://img.shields.io/badge/README-中文-red"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-brightgreen"></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-v0.6.3-black">
+  <img alt="Version" src="https://img.shields.io/badge/version-v0.6.4-black">
   <img alt="Codex Skill" src="https://img.shields.io/badge/Codex-Skill-0A0A0A">
   <img alt="MCP Included" src="https://img.shields.io/badge/MCP-Included-blue">
   <img alt="CCSwitch" src="https://img.shields.io/badge/CCSwitch-Model_Router-purple">
@@ -60,11 +60,12 @@ This is a miniature cost-management operating system for multi-agent coding.
 <h2 align="center">Latest Updates</h2>
 
 <p align="center">
-  <b>Current version: v0.6.3</b>
+  <b>Current version: v0.6.4</b>
 </p>
 
 | Version | What changed | Why it matters |
 | --- | --- | --- |
+| `v0.6.4` | Fixed GitHub issues #16, #17, and #18: final-only output now budgets persisted final text instead of raw stream noise, `--cwd` runs use the cwd-scoped artifact root with a run index for polling, and actual token aggregates are computed from raw `modelUsage` before redaction. | Codex now has measurable evidence for low-noise worker supervision: short final-only tasks no longer die from thinking/system stream noise, project artifacts stay inside the target workspace, and usage dashboards do not report fake zero-token runs. |
 | `v0.6.3` | Fixed the GitHub Actions docs deploy secret-scan false positive by splitting placeholder test tokens in selftest code. | The public docs pipeline can publish v0.6.x without mistaking safe placeholder examples for real credentials. |
 | `v0.6.2` | Fixed #15: Claude stream `modelUsage` is captured as `actual_model_usage`; metadata, dashboard, usage summary, and controller reports now distinguish declared route from actual billed model and flag `route_mismatch`. Added `supervise-decision` as a compatibility alias for `decision-review`. | Codex can now catch the painful case where a worker says it used one model but Claude actually bills another. The controller sees the real model, real usage, and mismatch risk. |
 | `v0.6.1` | Completed the GitHub issue audit pass: controller reports now include by-model totals, per-run duration, token estimates, stdout/events bytes, warning/blocking counts, and dashboard token estimates; legacy metadata writes now use the same UTF-8/control-character sanitizer. | The closed issues now have stronger evidence, not just feature names. Codex can hand you a report that is actually enough to judge worker health without opening raw logs. |
@@ -78,6 +79,19 @@ This is a miniature cost-management operating system for multi-agent coding.
 | `v0.1.0` | Built the first Skill + MCP + CLI foundation with CCSwitch profile discovery, model scoring, role routing, `CLAUDE.md` generation, visible Claude Code windows, logs, and safe defaults. | Proved the core idea: Codex is the brain, Claude Code is the worker layer, CCSwitch is the local model router. |
 
 <h3 align="center">Detailed Version Notes</h3>
+
+<details open>
+<summary><b>v0.6.4 - Data-Proven Worker Supervision Fixes</b></summary>
+
+- Fixed #16: `--final-only` now filters raw stream events before applying the persisted stdout budget.
+- Fixed #16: final-only stdout writes compact final result text instead of raw `system` / `assistant` stream JSON.
+- Fixed #17: `run`, `run-streaming`, and `run-visible` now use the `--cwd` workspace's `.agent-workspace/claude-code-orchestrator` artifact root.
+- Fixed #17: added a run index so `poll-run`, `run-status`, `stop-run`, `last-run`, and summaries can still find cwd-scoped run folders by run id.
+- Fixed #18: actual token aggregates are computed from raw Claude `modelUsage` before log/event redaction.
+- Replaced slow Windows `tasklist` PID checks with a Windows API process-status check.
+- Expanded `mock-stream-test` with data gates for final-only noise filtering, cwd artifact routing, and token aggregate preservation.
+
+</details>
 
 <details open>
 <summary><b>v0.6.3 - Docs Deploy Stability</b></summary>

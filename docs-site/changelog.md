@@ -2,6 +2,15 @@
 
 This page tracks the public docs-facing history of Claude Code Orchestrator Skill.
 
+## v0.6.4 - Data-proven worker supervision fixes
+
+- Fixed GitHub issues #16, #17, and #18.
+- `--final-only` now filters raw stream noise before applying the persisted stdout budget and writes compact final text.
+- `run`, `run-streaming`, and `run-visible` now use the `--cwd` scoped artifact root, with a run index so controller commands can still find runs by id.
+- Actual token aggregates are computed from raw Claude `modelUsage` before redaction.
+- Windows PID checks now use a system API instead of slow `tasklist` calls.
+- `mock-stream-test` now includes gates for final-only noise filtering, cwd artifact routing, and token aggregate preservation.
+
 ## v0.6.3 - Docs deploy stability
 
 - Fixed the GitHub Actions docs deploy secret-scan false positive caused by a selftest placeholder token.
