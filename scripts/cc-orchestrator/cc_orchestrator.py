@@ -109,6 +109,7 @@ WORKSPACE_ROOT = resolve_workspace_root()
 ARTIFACT_ROOT = resolve_artifact_root(WORKSPACE_ROOT)
 RUNS_DIR = ARTIFACT_ROOT / "runs"
 TEAMS_DIR = RUNS_DIR / "teams"
+RUN_INDEX_DIR = RUNS_DIR / "index"
 REPORTS_DIR = ARTIFACT_ROOT / "reports"
 DASHBOARD_DIR = ARTIFACT_ROOT / "dashboard"
 LEGACY_RUNS_DIR = ROOT / "runs"
@@ -131,6 +132,27 @@ QUEUE_PATH = RUNS_DIR / "queue.json"
 CLAUDE_MD_MARKER_BEGIN = "<!-- claude-code-orchestrator:begin -->"
 CLAUDE_MD_MARKER_END = "<!-- claude-code-orchestrator:end -->"
 SECRET_KEY_RE = re.compile(r"(key|token|secret|authorization|auth)", re.IGNORECASE)
+TOKEN_USAGE_KEYS = {
+    "inputtokens",
+    "outputtokens",
+    "totaltokens",
+    "actualinputtokens",
+    "actualoutputtokens",
+    "actualtotaltokens",
+    "inputtokensest",
+    "outputtokensest",
+    "totaltokensest",
+    "thinkingtokens",
+    "maxoutputtokens",
+    "cachereadinputtokens",
+    "cachecreationinputtokens",
+}
+MODEL_USAGE_ALLOWED_KEYS = TOKEN_USAGE_KEYS | {
+    "costusd",
+    "cost",
+    "contextwindow",
+    "websearchrequests",
+}
 SECRET_VALUE_RE = re.compile(
     r"("
     r"sk-[A-Za-z0-9_\-]{8,}|"
@@ -408,12 +430,48 @@ def load_json(path: Path) -> dict[str, Any]:
 
 def redact(value: Any) -> Any:
     if isinstance(value, dict):
-        return {k: ("***REDACTED***" if SECRET_KEY_RE.search(str(k)) else redact(v)) for k, v in value.items()}
+        return {k: ("***REDACTED***" if should_redact_key(str(k), v) else redact(v)) for k, v in value.items()}
     if isinstance(value, list):
         return [redact(v) for v in value]
     if isinstance(value, str):
         return SECRET_VALUE_RE.sub(lambda match: match.group(0)[:6] + "..." + match.group(0)[-4:], value)
     return value
+
+
+def is_number_like(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return True
+    if isinstance(value, str):
+        return re.fullmatch(r"\d+(?:\.\d+)?", value.strip()) is not None
+    return False
+
+
+def should_redact_key(key: str, value: Any) -> bool:
+    normalized = re.sub(r"[^a-z0-9]", "", key.lower())
+    if normalized in TOKEN_USAGE_KEYS and is_number_like(value):
+        return False
+    return bool(SECRET_KEY_RE.search(key))
+
+
+def sanitize_model_usage(usage: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(usage, dict):
+        return {}
+    safe_usage: dict[str, dict[str, Any]] = {}
+    for model_name, item in usage.items():
+        if not isinstance(item, dict):
+            continue
+        safe_item: dict[str, Any] = {}
+        for key, value in item.items():
+            normalized = re.sub(r"[^a-z0-9]", "", str(key).lower())
+            if normalized not in MODEL_USAGE_ALLOWED_KEYS:
+                continue
+            if is_number_like(value) or value == "***REDACTED***":
+                safe_item[str(key)] = value
+        if safe_item:
+            safe_usage[str(redact(str(model_name)))[:200]] = safe_item
+    return safe_usage
 
 
 def validate_env_key(key: str) -> str:
@@ -422,15 +480,20 @@ def validate_env_key(key: str) -> str:
     return key
 
 
-def build_worker_env(provider_env: dict[str, str], model_override: str | None = None) -> dict[str, str]:
+def build_worker_env(
+    provider_env: dict[str, str],
+    model_override: str | None = None,
+    workspace_root: str | Path | None = None,
+    artifact_root: str | Path | None = None,
+) -> dict[str, str]:
     env = {key: value for key, value in os.environ.items() if key in PASSTHROUGH_ENV_KEYS}
     for key, value in provider_env.items():
         env[validate_env_key(str(key))] = str(value)
     if model_override:
         env["ANTHROPIC_MODEL"] = str(model_override)
     env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
-    env["CC_ORCHESTRATOR_WORKSPACE_ROOT"] = str(WORKSPACE_ROOT)
-    env["CC_ORCHESTRATOR_ARTIFACT_ROOT"] = str(ARTIFACT_ROOT)
+    env["CC_ORCHESTRATOR_WORKSPACE_ROOT"] = str(Path(workspace_root).expanduser().resolve() if workspace_root else WORKSPACE_ROOT)
+    env["CC_ORCHESTRATOR_ARTIFACT_ROOT"] = str(Path(artifact_root).expanduser().resolve() if artifact_root else ARTIFACT_ROOT)
     return force_utf8_env(env)
 
 
@@ -917,11 +980,85 @@ def safe_run_dir(run_id: str) -> Path:
         raise OrchestratorError(f"Invalid run id: {run_id}")
     run_dir = (RUNS_DIR / run_id).resolve()
     root = RUNS_DIR.resolve()
-    try:
-        run_dir.relative_to(root)
-    except ValueError as exc:
-        raise OrchestratorError(f"Run id resolves outside run directory: {run_id}") from exc
+    if run_dir.exists():
+        try:
+            run_dir.relative_to(root)
+        except ValueError as exc:
+            raise OrchestratorError(f"Run id resolves outside run directory: {run_id}") from exc
+        return run_dir
+    index_path = RUN_INDEX_DIR / f"{run_id}.json"
+    if index_path.exists():
+        index = read_json_file(index_path, {})
+        return validate_indexed_run_dir(run_id, index, index_path)
     return run_dir
+
+
+def validate_indexed_run_dir(run_id: str, index: dict[str, Any], index_path: Path) -> Path:
+    if not isinstance(index, dict) or not index:
+        raise OrchestratorError(f"Invalid run index: {index_path}")
+    if str(index.get("run_id") or "") != run_id:
+        raise OrchestratorError(f"Run index id mismatch: {index_path}")
+    missing = [key for key in ("run_dir", "workspace_root", "artifact_root") if not index.get(key)]
+    if missing:
+        raise OrchestratorError(f"Run index missing {', '.join(missing)}: {index_path}")
+
+    workspace_root = Path(str(index["workspace_root"])).expanduser().resolve()
+    artifact_root = Path(str(index["artifact_root"])).expanduser().resolve()
+    run_dir = Path(str(index["run_dir"])).expanduser().resolve()
+    expected_artifact_root = (workspace_root / AGENT_WORKSPACE_DIRNAME / ARTIFACT_NAMESPACE).resolve()
+    if artifact_root != expected_artifact_root:
+        raise OrchestratorError(f"Run index artifact root does not match workspace root: {index_path}")
+    runs_root = (artifact_root / "runs").resolve()
+    try:
+        run_dir.relative_to(runs_root)
+    except ValueError as exc:
+        raise OrchestratorError(f"Indexed run dir resolves outside artifact runs root: {index_path}") from exc
+    if run_dir.name != run_id:
+        raise OrchestratorError(f"Indexed run dir name does not match run id: {index_path}")
+    if not run_dir.exists():
+        raise OrchestratorError(f"Indexed run dir does not exist: {run_dir}")
+    return run_dir
+
+
+def register_run_dir(run_id: str, run_dir: Path, workspace_root: Path, artifact_root: Path) -> Path:
+    if not RUN_ID_RE.match(run_id):
+        raise OrchestratorError(f"Invalid run id: {run_id}")
+    RUN_INDEX_DIR.mkdir(parents=True, exist_ok=True)
+    return write_json_file(
+        RUN_INDEX_DIR / f"{run_id}.json",
+        {
+            "run_id": run_id,
+            "run_dir": str(run_dir.resolve()),
+            "workspace_root": str(workspace_root.resolve()),
+            "artifact_root": str(artifact_root.resolve()),
+            "registered_at": utc_now_iso(),
+        },
+    )
+
+
+def known_run_dirs() -> list[Path]:
+    candidates: list[Path] = []
+    if RUNS_DIR.exists():
+        candidates.extend(path for path in RUNS_DIR.iterdir() if path.is_dir() and RUN_ID_RE.match(path.name))
+    if RUN_INDEX_DIR.exists():
+        for index_path in RUN_INDEX_DIR.glob("*.json"):
+            index = read_json_file(index_path, {})
+            run_id = str(index.get("run_id") or index_path.stem)
+            if not RUN_ID_RE.match(run_id):
+                continue
+            try:
+                candidates.append(validate_indexed_run_dir(run_id, index, index_path))
+            except OrchestratorError:
+                continue
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for path in candidates:
+        key = str(path.resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(path)
+    return unique
 
 
 def utc_now_iso() -> str:
@@ -1145,15 +1282,21 @@ def pid_alive(pid: int | None) -> bool:
         return False
     if os.name == "nt":
         try:
-            proc = subprocess.run(
-                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=5,
-            )
-            return proc.returncode == 0 and re.search(rf'"[^"]+","{pid}"[,"]', proc.stdout or "") is not None
+            import ctypes
+
+            kernel32 = ctypes.windll.kernel32
+            process_query_limited_information = 0x1000
+            still_active = 259
+            handle = kernel32.OpenProcess(process_query_limited_information, False, int(pid))
+            if not handle:
+                return False
+            exit_code = ctypes.c_ulong()
+            try:
+                if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                    return False
+                return exit_code.value == still_active
+            finally:
+                kernel32.CloseHandle(handle)
         except Exception:
             return False
     try:
@@ -1682,6 +1825,13 @@ def _number(value: Any) -> float:
         return 0.0
 
 
+def _number_or_none(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def extract_model_usage(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
@@ -1729,25 +1879,42 @@ def extract_payload_model(payload: Any) -> str | None:
 
 
 def actual_route_from_payload(payload: Any, declared_model: Any = None) -> dict[str, Any]:
-    usage = extract_model_usage(payload)
+    usage = sanitize_model_usage(extract_model_usage(payload))
     actual_model = extract_payload_model(payload)
     input_tokens = 0
     output_tokens = 0
     total_cost = 0.0
+    input_unknown = False
+    output_unknown = False
     for item in usage.values():
         if not isinstance(item, dict):
             continue
-        input_tokens += int(_number(item.get("inputTokens") or item.get("input_tokens")))
-        output_tokens += int(_number(item.get("outputTokens") or item.get("output_tokens")))
+        input_value = item.get("inputTokens") if item.get("inputTokens") is not None else item.get("input_tokens")
+        output_value = item.get("outputTokens") if item.get("outputTokens") is not None else item.get("output_tokens")
+        input_number = _number_or_none(input_value)
+        output_number = _number_or_none(output_value)
+        if input_value is not None and input_number is None:
+            input_unknown = True
+        elif input_number is not None:
+            input_tokens += int(input_number)
+        if output_value is not None and output_number is None:
+            output_unknown = True
+        elif output_number is not None:
+            output_tokens += int(output_number)
         total_cost += _number(item.get("costUSD") or item.get("cost_usd"))
+    actual_input_tokens = None if input_unknown and input_tokens == 0 else input_tokens
+    actual_output_tokens = None if output_unknown and output_tokens == 0 else output_tokens
+    actual_total_tokens = None
+    if usage and actual_input_tokens is not None and actual_output_tokens is not None:
+        actual_total_tokens = actual_input_tokens + actual_output_tokens
     declared = str(declared_model or "")
     mismatch = bool(actual_model and declared and normalize_model_name(actual_model) != normalize_model_name(declared))
     return {
         "actual_model": actual_model,
         "actual_model_usage": usage,
-        "actual_input_tokens": input_tokens,
-        "actual_output_tokens": output_tokens,
-        "actual_total_tokens": input_tokens + output_tokens if usage else None,
+        "actual_input_tokens": actual_input_tokens,
+        "actual_output_tokens": actual_output_tokens,
+        "actual_total_tokens": actual_total_tokens,
         "actual_cost_usd": total_cost if usage else None,
         "declared_model": declared or None,
         "route_mismatch": mismatch,
@@ -1787,6 +1954,17 @@ def actual_route_summary(metadata: dict[str, Any]) -> dict[str, Any]:
         "actual_total_tokens": metadata.get("actual_total_tokens", route.get("actual_total_tokens")),
         "actual_cost_usd": metadata.get("actual_cost_usd", route.get("actual_cost_usd")),
     }
+    if usage:
+        recalculated = actual_route_from_payload({"modelUsage": usage, "model": actual_model}, declared_model=declared_model)
+        for key in ("actual_input_tokens", "actual_output_tokens", "actual_total_tokens"):
+            current = summary.get(key)
+            replacement = recalculated.get(key)
+            if current in (None, 0) and replacement is not None:
+                summary[key] = replacement
+            elif current == 0 and replacement is None and summary.get("actual_cost_usd"):
+                summary[key] = None
+        if summary.get("actual_cost_usd") is None:
+            summary["actual_cost_usd"] = recalculated.get("actual_cost_usd")
     summary["route_mismatch"] = bool(
         metadata.get("route_mismatch")
         or route.get("route_mismatch")
@@ -2483,9 +2661,10 @@ def healthcheck() -> dict[str, Any]:
     return result
 
 
-def build_prompt(role: str, task: str, context: str | None = None) -> str:
+def build_prompt(role: str, task: str, context: str | None = None, artifact_root: str | Path | None = None) -> str:
     agents = load_json(AGENTS_PATH)
     agent = agents.get(role) or agents.get("implementation") or {}
+    scoped_artifact_root = Path(artifact_root).expanduser().resolve() if artifact_root else ARTIFACT_ROOT
     pieces = [
         "Codex is the controller, reviewer, and final decision maker. You are a Claude Code worker.",
         "",
@@ -2496,7 +2675,7 @@ def build_prompt(role: str, task: str, context: str | None = None) -> str:
         "- Do not reveal API keys, tokens, secrets, or hidden configuration values.",
         "- Do not revert unrelated work.",
         "- If you edit files, list every changed file and why.",
-        f"- Put agent logs, reports, temporary files, and rollback notes only under: {ARTIFACT_ROOT}",
+        f"- Put agent logs, reports, temporary files, and rollback notes only under: {scoped_artifact_root}",
         "",
         "Task:",
         task.strip(),
@@ -2574,13 +2753,15 @@ def run_agent(
     timeout = min(timeout, int(policy.get("safety", {}).get("max_timeout_seconds", 1800)))
     timeout = enforce_cost_guard(route.get("model_override") or provider.model, timeout)
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
-    run_dir = RUNS_DIR / run_id
+    effective_cwd = (cwd or Path.cwd()).expanduser().resolve()
+    paths = workspace_paths(effective_cwd)
+    run_dir = paths["runs"] / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
-    prompt = build_prompt(role, task, context)
+    register_run_dir(run_id, run_dir, paths["workspace_root"], paths["artifact_root"])
+    prompt = build_prompt(role, task, context, artifact_root=paths["artifact_root"])
     safe_prompt = str(redact(prompt))
     prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
-    effective_cwd = cwd or Path.cwd()
-    env = build_worker_env(provider.env, route.get("model_override"))
+    env = build_worker_env(provider.env, route.get("model_override"), workspace_root=paths["workspace_root"], artifact_root=paths["artifact_root"])
     cmd = [
         claude_bin_path(),
         "-p",
@@ -2596,6 +2777,9 @@ def run_agent(
         "run_id": run_id,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "cwd": str(effective_cwd),
+        "workspace_root": str(paths["workspace_root"]),
+        "artifact_root": str(paths["artifact_root"]),
+        "runs_root": str(paths["runs"]),
         "role": role,
         "task_type": route["task_type"],
         "profile": {
@@ -2671,8 +2855,10 @@ def run_agent(
     metadata["write_scope_check"] = scope_check
     metadata["acceptance_status"] = "blocked_write_scope" if not scope_check.get("ok", True) else "pending_controller_review"
     write_metadata(run_dir, metadata)
-    latest_path = RUNS_DIR / "latest.txt"
-    latest_path.write_text(run_id, encoding="utf-8")
+    paths["runs"].mkdir(parents=True, exist_ok=True)
+    (paths["runs"] / "latest.txt").write_text(run_id, encoding="utf-8")
+    RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    (RUNS_DIR / "latest.txt").write_text(run_id, encoding="utf-8")
     return {
         **metadata,
         "stdout_tail": str(safe_stdout)[-4000:],
@@ -2737,11 +2923,13 @@ def run_streaming_agent(
         )
         context = "\n\n".join(part for part in [context or "", final_rules] if part)
 
+    effective_cwd = (cwd or Path.cwd()).expanduser().resolve()
+    paths = workspace_paths(effective_cwd)
     run_id = new_run_id()
-    run_dir = RUNS_DIR / run_id
+    run_dir = paths["runs"] / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
-    effective_cwd = cwd or Path.cwd()
-    prompt = build_prompt(role, task, context)
+    register_run_dir(run_id, run_dir, paths["workspace_root"], paths["artifact_root"])
+    prompt = build_prompt(role, task, context, artifact_root=paths["artifact_root"])
     safe_prompt = str(redact(prompt))
     prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
     prompt_path = run_dir / "prompt.txt"
@@ -2759,6 +2947,9 @@ def run_streaming_agent(
         "status": "starting",
         "started_at": utc_now_iso(),
         "cwd": str(effective_cwd),
+        "workspace_root": str(paths["workspace_root"]),
+        "artifact_root": str(paths["artifact_root"]),
+        "runs_root": str(paths["runs"]),
         "role": role,
         "task_type": route["task_type"],
         "profile": {
@@ -2797,7 +2988,12 @@ def run_streaming_agent(
     write_metadata(run_dir, metadata)
     append_event(run_dir, {"type": "run_started", "status": "starting", "role": role, "task_type": route["task_type"]})
 
-    env = build_worker_env(provider.env, selected_model if selected_model != provider.model else route.get("model_override"))
+    env = build_worker_env(
+        provider.env,
+        selected_model if selected_model != provider.model else route.get("model_override"),
+        workspace_root=paths["workspace_root"],
+        artifact_root=paths["artifact_root"],
+    )
     worker_cmd = [sys.executable, "-B", str(Path(__file__).resolve()), "_stream-worker", "--run-id", run_id]
     creationflags = 0
     popen_kwargs: dict[str, Any] = {}
@@ -2823,6 +3019,9 @@ def run_streaming_agent(
     metadata.update({"worker_pid": worker.pid, "worker_command": redact(worker_cmd)})
     write_metadata(run_dir, metadata)
     append_event(run_dir, {"type": "stream_worker_started", "worker_pid": worker.pid})
+    paths["runs"].mkdir(parents=True, exist_ok=True)
+    (paths["runs"] / "latest.txt").write_text(run_id, encoding="utf-8")
+    RUNS_DIR.mkdir(parents=True, exist_ok=True)
     (RUNS_DIR / "latest.txt").write_text(run_id, encoding="utf-8")
     return {
         **metadata,
@@ -2933,7 +3132,7 @@ def stream_worker(run_id: str) -> dict[str, Any]:
         if isinstance(payload, dict):
             event_type = str(payload.get("type") or "")
             subtype = str(payload.get("subtype") or "")
-            if event_type in {"result", "system"} or subtype in {"success", "error"}:
+            if event_type == "result" or subtype in {"success", "error"}:
                 return True
         return False
 
@@ -3003,29 +3202,12 @@ def stream_worker(run_id: str) -> dict[str, Any]:
             with out_path.open("a", encoding="utf-8", errors="replace") as out:
                 for line in iter(stream.readline, ""):
                     raw_bytes = len(line.encode("utf-8", errors="replace"))
-                    write_line = True
-                    with budget_lock:
-                        observed = int(budget.get("observed_output_bytes") or 0) + raw_bytes
-                        budget["observed_output_bytes"] = observed
-                        soft = budget.get("soft_output_bytes")
-                        if soft and observed > int(soft) and budget.get("state") == "within_budget":
-                            budget["state"] = "soft_exceeded"
-                            budget["triggered_at"] = utc_now_iso()
-                            budget["triggered_by"] = source
-                            persist_budget_unlocked()
-                        hard = budget.get("max_output_bytes")
-                        if hard and observed > int(hard):
-                            budget["dropped_output_bytes"] = int(budget.get("dropped_output_bytes") or 0) + raw_bytes
-                            write_line = False
-                    if not write_line:
-                        trigger_budget("output_budget_exceeded", source)
-                        if str(budget.get("policy") or "stop") == "stop":
-                            break
-                        continue
                     safe_line = str(redact(line))
+                    raw_payload: Any | None = None
                     if source == "stdout":
                         try:
-                            parsed_payload: Any = redact(json.loads(line))
+                            raw_payload = json.loads(line)
+                            parsed_payload: Any = redact(raw_payload)
                             parsed_event_type = "claude_stream"
                         except json.JSONDecodeError:
                             parsed_payload = {"text": safe_line.rstrip("\r\n")}
@@ -3033,16 +3215,38 @@ def stream_worker(run_id: str) -> dict[str, Any]:
                     else:
                         parsed_payload = {"text": safe_line.rstrip("\r\n")}
                         parsed_event_type = "stderr"
-                    if source == "stdout" and isinstance(parsed_payload, dict):
-                        record_actual_route(parsed_payload)
-                    if budget.get("final_only") and not event_is_final_or_control({"type": parsed_event_type, "source": source, "payload": parsed_payload}):
+                    if source == "stdout" and isinstance(raw_payload, dict):
+                        record_actual_route(raw_payload)
+                    event = {"type": parsed_event_type, "source": source, "payload": parsed_payload}
+                    if budget.get("final_only") and not event_is_final_or_control(event):
                         with budget_lock:
+                            budget["observed_output_bytes"] = int(budget.get("observed_output_bytes") or 0) + raw_bytes
                             budget["dropped_output_bytes"] = int(budget.get("dropped_output_bytes") or 0) + raw_bytes
+                        continue
+                    if budget.get("final_only") and isinstance(parsed_payload, dict) and parsed_payload.get("type") == "result" and parsed_payload.get("result") is not None:
+                        safe_line = str(redact(str(parsed_payload.get("result")))).rstrip("\r\n") + "\n"
+                    safe_line_bytes = len(safe_line.encode("utf-8", errors="replace"))
+                    write_line = True
+                    with budget_lock:
+                        budget["observed_output_bytes"] = int(budget.get("observed_output_bytes") or 0) + raw_bytes
+                        projected_written = int(budget.get("written_output_bytes") or 0) + safe_line_bytes
+                        soft = budget.get("soft_output_bytes")
+                        if soft and projected_written > int(soft) and budget.get("state") == "within_budget":
+                            budget["state"] = "soft_exceeded"
+                            budget["triggered_at"] = utc_now_iso()
+                            budget["triggered_by"] = source
+                            persist_budget_unlocked()
+                        hard = budget.get("max_output_bytes")
+                        if hard and projected_written > int(hard):
+                            budget["dropped_output_bytes"] = int(budget.get("dropped_output_bytes") or 0) + safe_line_bytes
+                            write_line = False
+                    if not write_line:
+                        trigger_budget("output_budget_exceeded", source)
                         continue
                     out.write(safe_line)
                     out.flush()
                     with budget_lock:
-                        budget["written_output_bytes"] = int(budget.get("written_output_bytes") or 0) + len(safe_line.encode("utf-8", errors="replace"))
+                        budget["written_output_bytes"] = int(budget.get("written_output_bytes") or 0) + safe_line_bytes
                     payload = parsed_payload
                     event_type = parsed_event_type
                     phase = extract_event_phase(payload, source)
@@ -3255,7 +3459,7 @@ def run_status(
     if run_id:
         return single_run_status(run_id, include_output_tail=include_output_tail, tail_chars=tail_chars)
     runs: list[dict[str, Any]] = []
-    candidates = [path for path in RUNS_DIR.iterdir() if path.is_dir() and RUN_ID_RE.match(path.name)]
+    candidates = known_run_dirs()
     candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
     for path in candidates:
         try:
@@ -4930,9 +5134,7 @@ def daily_usage_summary(date: str | None = None, write_report: bool = False) -> 
     target_date = date or datetime.now(timezone.utc).date().isoformat()
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
     runs: list[dict[str, Any]] = []
-    for path in RUNS_DIR.iterdir():
-        if not path.is_dir() or not RUN_ID_RE.match(path.name):
-            continue
+    for path in known_run_dirs():
         try:
             usage = estimate_run_usage(path.name)
         except Exception:
@@ -5292,21 +5494,22 @@ def write_fake_claude_launcher(directory: Path) -> Path:
                 "delay = float(os.environ.get('CC_ORCHESTRATOR_FAKE_DELAY', '0.05'))",
                 "payload_bytes = int(os.environ.get('CC_ORCHESTRATOR_FAKE_PAYLOAD_BYTES', '0'))",
                 "payload = 'x' * payload_bytes",
+                "model_usage = {'fake-model': {'inputTokens': 123, 'outputTokens': 45, 'costUSD': 0.99, 'contextWindow': 200000, 'maxOutputTokens': 4096}}",
                 "print(json.dumps({'type':'system','subtype':'init','cwd':os.getcwd()}), flush=True)",
                 "for i in range(steps):",
-                "    print(json.dumps({'type':'assistant','phase':f'mock-step-{i}','message':{'content':[{'type':'text','text':f'mock step {i} {payload}'}]}}), flush=True)",
+                "    print(json.dumps({'type':'assistant','phase':f'mock-step-{i}','thinking_tokens':i,'message':{'content':[{'type':'text','text':f'mock step {i} {payload}'}]}}), flush=True)",
                 "    time.sleep(delay)",
-                "print(json.dumps({'type':'result','subtype':'success','result':'mock complete'}), flush=True)",
+                "print(json.dumps({'type':'result','subtype':'success','result':'mock complete','modelUsage':model_usage}), flush=True)",
             ]
         ),
         encoding="utf-8",
     )
     if os.name == "nt":
         launcher = directory / "fake-claude.cmd"
-        launcher.write_text(f"@echo off\r\n\"{sys.executable}\" \"{script}\" %*\r\n", encoding="utf-8")
+        launcher.write_text(f"@echo off\r\n\"{sys.executable}\" \"{script}\"\r\n", encoding="utf-8")
     else:
         launcher = directory / "fake-claude"
-        launcher.write_text(f"#!/usr/bin/env sh\nexec \"{sys.executable}\" \"{script}\" \"$@\"\n", encoding="utf-8")
+        launcher.write_text(f"#!/usr/bin/env sh\nexec \"{sys.executable}\" \"{script}\"\n", encoding="utf-8")
         launcher.chmod(0o755)
     return launcher
 
@@ -5321,10 +5524,10 @@ def mock_stream_test(timeout_seconds: int = 20) -> dict[str, Any]:
     mock_parent = Path(os.environ.get("PROGRAMDATA") or "C:/ProgramData") / "cc-orchestrator-mock"
     mock_dir = mock_parent / uuid.uuid4().hex[:12]
     mock_dir.mkdir(parents=True, exist_ok=False)
+    launcher = write_fake_claude_launcher(mock_dir)
+    os.environ["CLAUDE_CODE_BIN"] = str(launcher)
+    cleanup_mock_dir = os.environ.get("CC_ORCHESTRATOR_CLEAN_MOCK_DIR") == "1"
     try:
-        launcher = write_fake_claude_launcher(mock_dir)
-        os.environ["CLAUDE_CODE_BIN"] = str(launcher)
-        try:
             os.environ["CC_ORCHESTRATOR_FAKE_STEPS"] = "4"
             os.environ["CC_ORCHESTRATOR_FAKE_DELAY"] = "0.05"
             finish_run = run_streaming_agent("mock finish test", role="testing", timeout_seconds=timeout_seconds)
@@ -5365,7 +5568,7 @@ def mock_stream_test(timeout_seconds: int = 20) -> dict[str, Any]:
                 timeout_seconds=timeout_seconds,
                 max_output_bytes=3000,
                 max_events_bytes=200000,
-                kill_on_excessive_output=True,
+                output_budget_policy="truncate",
             )
             deadline = time.time() + timeout_seconds
             budget_status: dict[str, Any] = {}
@@ -5376,8 +5579,79 @@ def mock_stream_test(timeout_seconds: int = 20) -> dict[str, Any]:
                 time.sleep(0.1)
             budget_meta = read_metadata(safe_run_dir(budget_run["run_id"]))
             budget_state = budget_meta.get("output_budget") or {}
-            gates["output_budget_stopped_worker"] = budget_status.get("status") == "stopped"
+            gates["output_budget_truncated_without_hang"] = budget_status.get("status") in {"succeeded", "stopped"} and budget_state.get("state") == "truncated"
             gates["output_budget_reason_recorded"] = budget_meta.get("stop_reason") == "output_budget_exceeded" or budget_state.get("stop_reason") == "output_budget_exceeded"
+
+            os.environ["CC_ORCHESTRATOR_FAKE_STEPS"] = "12"
+            os.environ["CC_ORCHESTRATOR_FAKE_DELAY"] = "0"
+            os.environ["CC_ORCHESTRATOR_FAKE_PAYLOAD_BYTES"] = "4096"
+            final_only_run = run_streaming_agent(
+                "mock final-only budget test",
+                role="testing",
+                timeout_seconds=timeout_seconds,
+                max_output_bytes=20000,
+                max_events_bytes=200000,
+                final_only=True,
+                final_max_chars=1200,
+            )
+            deadline = time.time() + timeout_seconds
+            final_only_status: dict[str, Any] = {}
+            while time.time() < deadline:
+                final_only_status = run_status(run_id=final_only_run["run_id"], include_output_tail=True)
+                if not final_only_status.get("active"):
+                    break
+                time.sleep(0.1)
+            final_only_dir = safe_run_dir(final_only_run["run_id"])
+            final_only_meta = read_metadata(final_only_dir)
+            final_only_stdout = (final_only_dir / "stdout.txt").read_text(encoding="utf-8", errors="replace")
+            final_only_budget = final_only_meta.get("output_budget") or {}
+            gates["final_only_completed_under_low_budget"] = final_only_status.get("status") == "succeeded" and final_only_meta.get("stop_reason") not in {"output_budget_exceeded", "events_budget_exceeded"}
+            gates["final_only_stdout_is_compact"] = "mock complete" in final_only_stdout and "thinking_tokens" not in final_only_stdout and '"type": "assistant"' not in final_only_stdout and len(final_only_stdout.encode("utf-8")) < 20000
+            gates["actual_model_usage_tokens_preserved"] = final_only_meta.get("actual_input_tokens") == 123 and final_only_meta.get("actual_output_tokens") == 45 and final_only_meta.get("actual_total_tokens") == 168
+            gates["actual_model_usage_cost_preserved"] = abs(float(final_only_meta.get("actual_cost_usd") or 0) - 0.99) < 0.000001
+
+            cwd_target = mock_dir / "target-中文路径"
+            cwd_target.mkdir(parents=True, exist_ok=True)
+            init_workspace(cwd=cwd_target, write_claude=False, repair_mcp=False)
+            cwd_paths = workspace_paths(cwd_target)
+            cwd_run_id = new_run_id()
+            cwd_run_dir = cwd_paths["runs"] / cwd_run_id
+            cwd_run_dir.mkdir(parents=True, exist_ok=False)
+            register_run_dir(cwd_run_id, cwd_run_dir, cwd_paths["workspace_root"], cwd_paths["artifact_root"])
+            cwd_prompt = build_prompt("testing", "mock cwd artifact root test", artifact_root=cwd_paths["artifact_root"])
+            write_metadata(
+                cwd_run_dir,
+                {
+                    "run_id": cwd_run_id,
+                    "status": "succeeded",
+                    "cwd": str(cwd_target.resolve()),
+                    "artifact_root": str(cwd_paths["artifact_root"].resolve()),
+                    "runs_root": str(cwd_paths["runs"].resolve()),
+                },
+            )
+            gates["cwd_run_uses_cwd_artifact_root"] = cwd_run_dir.parent.resolve() == cwd_paths["runs"].resolve()
+            gates["cwd_prompt_uses_cwd_artifact_root"] = str(cwd_paths["artifact_root"].resolve()) in cwd_prompt
+            gates["cwd_metadata_records_artifact_root"] = Path(str(read_metadata(cwd_run_dir).get("artifact_root"))).resolve() == cwd_paths["artifact_root"].resolve()
+            gates["cwd_safe_run_dir_finds_indexed_run"] = safe_run_dir(cwd_run_id).resolve() == cwd_run_dir.resolve()
+            tampered_dir = mock_dir / "outside-index" / cwd_run_id
+            tampered_dir.mkdir(parents=True, exist_ok=True)
+            write_json_file(
+                RUN_INDEX_DIR / f"{cwd_run_id}.json",
+                {
+                    "run_id": cwd_run_id,
+                    "run_dir": str(tampered_dir.resolve()),
+                    "workspace_root": str(cwd_paths["workspace_root"].resolve()),
+                    "artifact_root": str(cwd_paths["artifact_root"].resolve()),
+                    "registered_at": utc_now_iso(),
+                },
+            )
+            try:
+                safe_run_dir(cwd_run_id)
+                gates["cwd_tampered_run_index_rejected"] = False
+            except OrchestratorError:
+                gates["cwd_tampered_run_index_rejected"] = True
+            register_run_dir(cwd_run_id, cwd_run_dir, cwd_paths["workspace_root"], cwd_paths["artifact_root"])
+            gates["cwd_global_run_dir_not_created"] = not (RUNS_DIR / cwd_run_id).exists()
             details = {
                 "finish_run_id": finish_run["run_id"],
                 "finish_poll": finish_poll,
@@ -5388,26 +5662,35 @@ def mock_stream_test(timeout_seconds: int = 20) -> dict[str, Any]:
                 "budget_run_id": budget_run["run_id"],
                 "budget_status": budget_status,
                 "budget_state": budget_state,
+                "final_only_run_id": final_only_run["run_id"],
+                "final_only_status": final_only_status,
+                "final_only_stdout_bytes": len(final_only_stdout.encode("utf-8")),
+                "final_only_budget": final_only_budget,
+                "cwd_run_id": cwd_run_id,
+                "cwd_run_dir": str(cwd_run_dir),
+                "cwd_expected_runs": str(cwd_paths["runs"]),
             }
-        finally:
-            if old_bin is None:
-                os.environ.pop("CLAUDE_CODE_BIN", None)
-            else:
-                os.environ["CLAUDE_CODE_BIN"] = old_bin
-            if old_steps is None:
-                os.environ.pop("CC_ORCHESTRATOR_FAKE_STEPS", None)
-            else:
-                os.environ["CC_ORCHESTRATOR_FAKE_STEPS"] = old_steps
-            if old_delay is None:
-                os.environ.pop("CC_ORCHESTRATOR_FAKE_DELAY", None)
-            else:
-                os.environ["CC_ORCHESTRATOR_FAKE_DELAY"] = old_delay
-            if old_payload is None:
-                os.environ.pop("CC_ORCHESTRATOR_FAKE_PAYLOAD_BYTES", None)
-            else:
-                os.environ["CC_ORCHESTRATOR_FAKE_PAYLOAD_BYTES"] = old_payload
     finally:
-        shutil.rmtree(mock_dir, ignore_errors=True)
+        if old_bin is None:
+            os.environ.pop("CLAUDE_CODE_BIN", None)
+        else:
+            os.environ["CLAUDE_CODE_BIN"] = old_bin
+        if old_steps is None:
+            os.environ.pop("CC_ORCHESTRATOR_FAKE_STEPS", None)
+        else:
+            os.environ["CC_ORCHESTRATOR_FAKE_STEPS"] = old_steps
+        if old_delay is None:
+            os.environ.pop("CC_ORCHESTRATOR_FAKE_DELAY", None)
+        else:
+            os.environ["CC_ORCHESTRATOR_FAKE_DELAY"] = old_delay
+        if old_payload is None:
+            os.environ.pop("CC_ORCHESTRATOR_FAKE_PAYLOAD_BYTES", None)
+        else:
+            os.environ["CC_ORCHESTRATOR_FAKE_PAYLOAD_BYTES"] = old_payload
+        if cleanup_mock_dir:
+            shutil.rmtree(mock_dir, ignore_errors=True)
+        else:
+            details["mock_dir"] = str(mock_dir)
     return {"ok": all(gates.values()), "gates": gates, "details": details}
 
 
@@ -5426,16 +5709,18 @@ def run_visible_agent(
     route = resolve_route(role=role, task_type=task_type, profile=profile)
     provider = get_provider(route["profile"])
     permission_mode = route["permission_mode"] if not allow_write else "acceptEdits"
-    prompt = build_prompt(role, task, context)
+    effective_cwd = (cwd or Path.cwd()).expanduser().resolve()
+    paths = workspace_paths(effective_cwd)
+    prompt = build_prompt(role, task, context, artifact_root=paths["artifact_root"])
     safe_prompt = str(redact(prompt))
-    effective_cwd = cwd or Path.cwd()
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
-    run_dir = RUNS_DIR / run_id
+    run_dir = paths["runs"] / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
+    register_run_dir(run_id, run_dir, paths["workspace_root"], paths["artifact_root"])
     prompt_path = run_dir / "prompt.txt"
     bootstrap_path = run_dir / "start-visible.ps1"
     prompt_path.write_text(safe_prompt, encoding="utf-8")
-    env = build_worker_env(provider.env, route.get("model_override"))
+    env = build_worker_env(provider.env, route.get("model_override"), workspace_root=paths["workspace_root"], artifact_root=paths["artifact_root"])
     env_for_log: dict[str, str] = {}
     for key, value in provider.env.items():
         env_for_log[key] = value
@@ -5465,6 +5750,9 @@ def run_visible_agent(
         "started_at": datetime.now(timezone.utc).isoformat(),
         "mode": "visible_window",
         "cwd": str(effective_cwd),
+        "workspace_root": str(paths["workspace_root"]),
+        "artifact_root": str(paths["artifact_root"]),
+        "runs_root": str(paths["runs"]),
         "role": role,
         "task_type": route["task_type"],
         "profile": {
@@ -5495,6 +5783,9 @@ def run_visible_agent(
         env=env,
         creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
     )
+    paths["runs"].mkdir(parents=True, exist_ok=True)
+    (paths["runs"] / "latest.txt").write_text(run_id, encoding="utf-8")
+    RUNS_DIR.mkdir(parents=True, exist_ok=True)
     (RUNS_DIR / "latest.txt").write_text(run_id, encoding="utf-8")
     return metadata
 
@@ -5787,6 +6078,14 @@ def selftest() -> dict[str, Any]:
     sample_github_token = "ghp_" + ("1" * 36)
     sample_api_key = "sk-" + "testSecretValue"
     redacted = str(redact(f"token {sample_github_token} {sample_api_key}"))
+    usage_redacted = redact(
+        {
+            "actual_total_tokens": 168,
+            "inputTokens": 123,
+            "outputTokens": "45",
+            "github_token": sample_github_token,
+        }
+    )
     try:
         safe_run_dir("../bad")
         run_id_rejected = False
@@ -5798,7 +6097,7 @@ def selftest() -> dict[str, Any]:
     false_findings = secret_scan_text("input_tokens = estimate_tokens_from_text(prompt)", "selftest")
     warning_risks = risk_summary([{"code": "soft_output", "severity": "medium", "blocking": False, "message": "warning only"}])
     actual_route = actual_route_from_payload(
-        {"modelUsage": {"glm-5.2": {"inputTokens": 100, "outputTokens": 25, "costUSD": 0.12}}},
+        {"modelUsage": {"glm-5.2": {"inputTokens": 100, "outputTokens": 25, "costUSD": 0.12, "apiKey": sample_github_token}}},
         declared_model="qwen3.7-plus",
     )
     status = workspace_status()
@@ -5827,11 +6126,13 @@ def selftest() -> dict[str, Any]:
         "prompt_pack_available": bool(prompt_pack.get("ok")) and bool(prompt_pack.get("templates")),
         "claude_md_template": "Assigned role: review" in claude_md and CLAUDE_MD_MARKER_BEGIN in claude_md,
         "secret_redaction": sample_github_token not in redacted and sample_api_key not in redacted,
+        "numeric_token_usage_not_redacted": usage_redacted.get("actual_total_tokens") == 168 and usage_redacted.get("inputTokens") == 123 and usage_redacted.get("outputTokens") == "45" and usage_redacted.get("github_token") == "***REDACTED***",
         "secret_scan_detects_assignment": bool(secret_findings) and secret_findings[0].get("classification") == "real_secret_candidate",
         "secret_scan_downgrades_placeholder": bool(placeholder_findings) and placeholder_findings[0].get("classification") == "placeholder_or_example" and not placeholder_findings[0].get("blocking"),
         "secret_scan_ignores_token_words": not false_findings,
         "risk_warning_not_blocking": warning_risks.get("ok") and warning_risks.get("has_warnings") and warning_risks.get("blocking_count") == 0,
         "actual_model_usage_detects_mismatch": actual_route.get("actual_model") == "glm-5.2" and actual_route.get("actual_total_tokens") == 125 and actual_route.get("route_mismatch"),
+        "actual_model_usage_allowlist": "apiKey" not in actual_route.get("actual_model_usage", {}).get("glm-5.2", {}),
         "utf8_json_roundtrip": json_roundtrip.get("prompt") == "中文✅�" and "中文项目" in str(json_roundtrip.get("path")),
         "change_split_source_vs_artifact": change_split["project_source_changes"]["changed_count"] == 1 and change_split["agent_artifact_changes"]["changed_count"] == 1,
         "run_id_validation": run_id_rejected,
