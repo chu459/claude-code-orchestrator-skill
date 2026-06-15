@@ -1,15 +1,16 @@
 {
   "name": "claude-code-orchestrator-skill",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "schema_version": 2,
-  "released_at": "2026-06-14",
+  "released_at": "2026-06-16",
   "notes": [
     "Adds controller operations hardening for GitHub issues #3-#12: transactional role-team launch, hard output budgets, route-preserving follow-ups, Windows UTF-8 validation, risk/secret classification, source-vs-artifact diffs, operations dashboard, controller pressure reports, and supervisor decision review.",
     "Completes the issue audit by expanding controller pressure reports, usage summaries, and dashboard output with model totals, token estimates, warning/blocking counts, and sanitized metadata writes.",
     "Records Claude stream modelUsage as actual_model_usage, groups usage by actual model when available, and flags route_mismatch when the declared route differs from the billed model.",
     "Fixes the GitHub Actions docs deploy secret-scan false positive by splitting placeholder test tokens while keeping placeholder-secret regression coverage.",
     "Fixes GitHub issues #16, #17, and #18 with data-tested final-only output filtering, cwd-scoped artifact roots plus run indexing, raw modelUsage token aggregation before redaction, and faster Windows PID checks.",
-    "Adds the first workflow DAG controller layer for GitHub issues #20, #21, and #22: YAML/JSON validation, dry-run batches, mock workflow runs, structured handoff contracts, node gates, retry decisions, loop guard, workflow reports, and matching MCP tools."
+    "Adds the first workflow DAG controller layer for GitHub issues #20, #21, and #22: YAML/JSON validation, dry-run batches, mock workflow runs, structured handoff contracts, node gates, retry decisions, loop guard, workflow reports, and matching MCP tools.",
+    "Fixes GitHub issue #24 so manual workflow retry changes the top-level status to needs_rerun and marks invalidated node evidence as stale instead of surfacing old success evidence."
   ],
   "local_user_owned_files": [
     "scripts/cc-orchestrator/config/model_calibration.json",
