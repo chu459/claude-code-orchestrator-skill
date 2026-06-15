@@ -1,0 +1,55 @@
+schema_version: 1
+id: safe-refactor
+description: Analyze, implement, test, review, and gate a scoped refactor.
+
+defaults:
+  timeout_seconds: 900
+  final_only: true
+  max_output_bytes: 20000
+  max_events_bytes: 160000
+  allow_write: false
+
+nodes:
+  requirements:
+    role: requirements
+    task: Clarify scope, constraints, and acceptance criteria.
+    outputs: requirements_handoff
+
+  implementation:
+    role: development
+    needs: [requirements]
+    allow_write: true
+    write_scope:
+      allow: ["src/", "tests/"]
+      deny: [".env", ".env.*"]
+      max_diff_lines: 800
+    task: Apply scoped changes.
+    outputs: implementation_handoff
+
+  testing:
+    role: testing
+    needs: [implementation]
+    task: Run focused tests and report failures.
+    outputs: testing_handoff
+
+  review:
+    role: review
+    needs: [implementation]
+    task: Review changed files and residual risks.
+    outputs: review_handoff
+
+  quality_gate:
+    type: gate
+    needs: [testing, review]
+    pass_when:
+      - testing.status == "pass"
+      - review.blocking_count == 0
+    on_fail:
+      retry: implementation
+      max_retries: 2
+
+  supervisor:
+    role: supervisor
+    needs: [quality_gate]
+    task: Audit whether Codex may accept the workflow result.
+    outputs: supervisor_handoff

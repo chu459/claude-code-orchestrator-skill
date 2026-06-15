@@ -110,6 +110,8 @@ ARTIFACT_ROOT = resolve_artifact_root(WORKSPACE_ROOT)
 RUNS_DIR = ARTIFACT_ROOT / "runs"
 TEAMS_DIR = RUNS_DIR / "teams"
 RUN_INDEX_DIR = RUNS_DIR / "index"
+WORKFLOWS_DIR = ARTIFACT_ROOT / "workflows"
+WORKFLOW_INDEX_DIR = WORKFLOWS_DIR / "index"
 REPORTS_DIR = ARTIFACT_ROOT / "reports"
 DASHBOARD_DIR = ARTIFACT_ROOT / "dashboard"
 LEGACY_RUNS_DIR = ROOT / "runs"
@@ -179,6 +181,7 @@ ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 RUN_ID_RE = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{8}$")
 TEAM_ID_RE = re.compile(r"^team-\d{8}T\d{6}Z-[0-9a-f]{8}$")
 QUEUE_JOB_ID_RE = re.compile(r"^job-\d{8}T\d{6}Z-[0-9a-f]{8}$")
+WORKFLOW_ID_RE = re.compile(r"^wf-\d{8}T\d{6}Z-[0-9a-f]{8}$")
 PASSTHROUGH_ENV_KEYS = {
     "PATH",
     "Path",
@@ -506,6 +509,7 @@ def workspace_paths(cwd: str | Path | None = None) -> dict[str, Path]:
         "artifact_root": artifact_root,
         "runs": artifact_root / "runs",
         "teams": artifact_root / "runs" / "teams",
+        "workflows": artifact_root / "workflows",
         "reports": artifact_root / "reports",
         "dashboard": artifact_root / "dashboard",
         "archives": artifact_root / "archives",
@@ -5847,6 +5851,738 @@ def run_workflow_plan(task: str, cwd: Path | None = None) -> dict[str, Any]:
     }
 
 
+HANDOFF_REQUIRED_FIELDS: dict[str, list[str]] = {
+    "base": ["schema_version", "run_id", "role", "status", "summary"],
+    "requirements": ["requirements", "boundaries", "acceptance_criteria"],
+    "architecture": ["touched_files", "dependencies", "plan", "risks"],
+    "development": ["changed_files", "write_scope", "commands_run"],
+    "implementation": ["changed_files", "write_scope", "commands_run"],
+    "testing": ["tests_run", "failures", "coverage_gaps"],
+    "review": ["findings", "blocking_issues", "residual_risk"],
+    "security": ["findings", "secret_exposure", "permissions", "blocking_status"],
+    "ops": ["deploy_impact", "rollback", "observability", "release_risk"],
+    "supervisor": ["verdict", "confidence", "objections", "missing_evidence"],
+}
+
+
+def handoff_required_fields(role: str) -> list[str]:
+    return HANDOFF_REQUIRED_FIELDS["base"] + HANDOFF_REQUIRED_FIELDS.get(role, [])
+
+
+def handoff_template(role: str = "testing") -> dict[str, Any]:
+    if role not in ROLE_ORDER and role not in HANDOFF_REQUIRED_FIELDS:
+        raise OrchestratorError(f"Unknown handoff role: {role}")
+    example: dict[str, Any] = {
+        "schema_version": 1,
+        "run_id": "20260615T000000Z-example",
+        "node_id": role,
+        "role": role,
+        "status": "pass",
+        "summary": f"Example {role} handoff.",
+        "inputs_consumed": [],
+        "changed_files": [],
+        "commands_run": [],
+        "risks": [],
+        "blocking_issues": [],
+        "next_inputs": {},
+    }
+    for field in HANDOFF_REQUIRED_FIELDS.get(role, []):
+        example.setdefault(field, [] if field not in {"write_scope", "blocking_status", "confidence", "verdict"} else {})
+    if role == "supervisor":
+        example["verdict"] = "approve"
+        example["confidence"] = "medium"
+    schema = {
+        "schema_version": 1,
+        "role": role,
+        "required": handoff_required_fields(role),
+        "status_values": ["pass", "fail", "blocked", "needs_repair"],
+        "note": "This compact contract is intentionally controller-validated and backwards-compatible with ad-hoc runs.",
+    }
+    return {"ok": True, "role": role, "schema": schema, "example": example}
+
+
+def validate_handoff_data(handoff: Any, role: str | None = None, schema: dict[str, Any] | None = None) -> dict[str, Any]:
+    if not isinstance(handoff, dict):
+        return {"ok": False, "missing_fields": handoff_required_fields(role or "testing"), "errors": ["handoff_not_object"], "blocking_count": 1}
+    effective_role = role or str(handoff.get("role") or "testing")
+    required = list((schema or {}).get("required") or handoff_required_fields(effective_role))
+    missing = [field for field in required if field not in handoff or handoff.get(field) in (None, "")]
+    errors: list[str] = []
+    status = str(handoff.get("status") or "")
+    if status and status not in {"pass", "fail", "blocked", "needs_repair"}:
+        errors.append("invalid_status")
+    blocking_count = len(handoff.get("blocking_issues") or []) if isinstance(handoff.get("blocking_issues"), list) else 0
+    if missing:
+        errors.append("missing_required_fields")
+    return {
+        "ok": not missing and not errors,
+        "role": effective_role,
+        "status": status or None,
+        "missing_fields": missing,
+        "errors": errors,
+        "blocking_count": blocking_count,
+    }
+
+
+def handoff_path_for_run(run_id: str) -> Path:
+    return safe_run_dir(run_id) / "handoff.json"
+
+
+def handoff_read(run_id: str) -> dict[str, Any]:
+    path = handoff_path_for_run(run_id)
+    if not path.exists():
+        return {"ok": False, "run_id": run_id, "path": str(path), "error": "handoff.json not found"}
+    return {"ok": True, "run_id": run_id, "path": str(path), "handoff": read_json_file(path, {})}
+
+
+def handoff_validate(run_id: str, schema_path: str | Path | None = None) -> dict[str, Any]:
+    if schema_path:
+        raise OrchestratorError("External handoff schema files are disabled in v0.7.0; use the built-in role schema.")
+    read = handoff_read(run_id)
+    if not read.get("ok"):
+        result = {"ok": False, "run_id": run_id, "missing_fields": ["handoff.json"], "errors": [read.get("error")]}
+    else:
+        result = validate_handoff_data(read.get("handoff"))
+        result.update({"run_id": run_id, "path": read.get("path")})
+    validation_path = safe_run_dir(run_id) / "handoff.validation.json"
+    write_json_file(validation_path, result)
+    result["validation_path"] = str(validation_path)
+    return result
+
+
+def handoff_repair_prompt(run_id: str) -> dict[str, Any]:
+    validation = handoff_validate(run_id)
+    missing = validation.get("missing_fields") or []
+    prompt = (
+        "Return only a JSON handoff object. "
+        f"Run id: {run_id}. "
+        f"Missing required fields: {', '.join(missing) if missing else 'none'}. "
+        "Do not include markdown fences or prose."
+    )
+    return {"ok": True, "run_id": run_id, "validation": validation, "prompt": prompt}
+
+
+def resolve_workflow_spec_path(file: str | Path, cwd: str | Path | None = None) -> Path:
+    raw_path = Path(file).expanduser()
+    if cwd is None:
+        return raw_path.resolve()
+    root = Path(cwd).expanduser().resolve()
+    path = raw_path if raw_path.is_absolute() else root / raw_path
+    resolved = path.resolve()
+    artifact_root = workspace_paths(root)["artifact_root"].resolve()
+    if not path_under(resolved, root) and not path_under(resolved, artifact_root):
+        raise OrchestratorError(f"Workflow file is outside cwd and managed artifact workspace: {resolved}")
+    return resolved
+
+
+def load_workflow_spec(file: str | Path, cwd: str | Path | None = None) -> dict[str, Any]:
+    path = resolve_workflow_spec_path(file, cwd=cwd)
+    text = path.read_text(encoding="utf-8")
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        try:
+            import yaml  # type: ignore
+
+            data = yaml.safe_load(text)
+        except Exception as exc:
+            try:
+                data = parse_simple_workflow_yaml(text)
+            except Exception as fallback_exc:
+                raise OrchestratorError(f"Cannot parse workflow YAML: {exc}; fallback parser also failed: {fallback_exc}") from fallback_exc
+    if not isinstance(data, dict):
+        raise OrchestratorError(f"Workflow file must contain an object: {path}")
+    data["_source_file"] = str(path)
+    data["_source_text"] = text
+    return data
+
+
+def workflow_error(code: str, message: str, **extra: Any) -> dict[str, Any]:
+    return {"ok": False, "error": {"code": code, "message": message, **extra}}
+
+
+def parse_simple_yaml_scalar(value: str) -> Any:
+    raw = value.strip()
+    if raw == "":
+        return ""
+    if raw in {"true", "True"}:
+        return True
+    if raw in {"false", "False"}:
+        return False
+    if raw in {"null", "Null", "~"}:
+        return None
+    if (raw.startswith('"') and raw.endswith('"')) or (raw.startswith("'") and raw.endswith("'")):
+        return raw[1:-1]
+    if raw.startswith("[") and raw.endswith("]"):
+        inner = raw[1:-1].strip()
+        if not inner:
+            return []
+        return [parse_simple_yaml_scalar(part.strip()) for part in inner.split(",")]
+    if re.fullmatch(r"-?\d+", raw):
+        return int(raw)
+    if re.fullmatch(r"-?\d+\.\d+", raw):
+        return float(raw)
+    return raw
+
+
+def parse_simple_workflow_yaml(text: str) -> dict[str, Any]:
+    """Parse the small YAML subset used by workflow specs when PyYAML is absent."""
+    rows: list[tuple[int, str]] = []
+    for raw_line in text.splitlines():
+        if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+            continue
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
+        rows.append((indent, raw_line.strip()))
+    root: dict[str, Any] = {}
+    stack: list[tuple[int, Any]] = [(-1, root)]
+    for index, (indent, content) in enumerate(rows):
+        while stack and indent <= stack[-1][0]:
+            stack.pop()
+        if not stack:
+            raise OrchestratorError("Invalid workflow YAML indentation.")
+        parent = stack[-1][1]
+        if content.startswith("- "):
+            if not isinstance(parent, list):
+                raise OrchestratorError("YAML list item appeared under a non-list parent.")
+            parent.append(parse_simple_yaml_scalar(content[2:].strip()))
+            continue
+        if ":" not in content:
+            raise OrchestratorError(f"Invalid workflow YAML line: {content}")
+        key, value = content.split(":", 1)
+        key = key.strip()
+        value = value.strip()
+        if not isinstance(parent, dict):
+            raise OrchestratorError("YAML mapping item appeared under a non-map parent.")
+        if value:
+            parent[key] = parse_simple_yaml_scalar(value)
+            continue
+        next_is_list = False
+        for next_indent, next_content in rows[index + 1 :]:
+            if next_indent <= indent:
+                break
+            next_is_list = next_content.startswith("- ")
+            break
+        container: Any = [] if next_is_list else {}
+        parent[key] = container
+        stack.append((indent, container))
+
+    return root
+
+
+def normalize_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def workflow_nodes(spec: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    raw = spec.get("nodes")
+    if not isinstance(raw, dict) or not raw:
+        raise OrchestratorError("Workflow must define a non-empty nodes map.")
+    return {str(node_id): (node if isinstance(node, dict) else {}) for node_id, node in raw.items()}
+
+
+def workflow_graph(nodes: dict[str, dict[str, Any]]) -> dict[str, list[str]]:
+    return {node_id: [str(item) for item in normalize_list(node.get("needs"))] for node_id, node in nodes.items()}
+
+
+def workflow_descendants(nodes: dict[str, dict[str, Any]], node_id: str) -> set[str]:
+    graph = workflow_graph(nodes)
+    result: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for candidate, needs in graph.items():
+            if candidate in result:
+                continue
+            if node_id in needs or any(item in needs for item in result):
+                result.add(candidate)
+                changed = True
+    return result
+
+
+def workflow_topological_batches(nodes: dict[str, dict[str, Any]]) -> list[list[str]]:
+    graph = workflow_graph(nodes)
+    remaining = set(nodes)
+    batches: list[list[str]] = []
+    while remaining:
+        ready = sorted(node_id for node_id in remaining if all(dep not in remaining for dep in graph[node_id]))
+        if not ready:
+            raise OrchestratorError("cycle_detected")
+        batches.append(ready)
+        remaining.difference_update(ready)
+    return batches
+
+
+def validate_workflow_spec(spec: dict[str, Any]) -> dict[str, Any]:
+    errors: list[dict[str, Any]] = []
+    nodes = workflow_nodes(spec)
+    for node_id, node in nodes.items():
+        node_type = str(node.get("type") or "worker")
+        needs = [str(item) for item in normalize_list(node.get("needs"))]
+        for dep in needs:
+            if dep not in nodes:
+                errors.append({"code": "missing_dependency", "node_id": node_id, "dependency": dep})
+        if node_type != "gate":
+            role = str(node.get("role") or "")
+            if role not in ROLE_ORDER:
+                errors.append({"code": "unknown_role", "node_id": node_id, "role": role})
+            if not node.get("outputs"):
+                errors.append({"code": "missing_outputs", "node_id": node_id})
+            if bool(node.get("allow_write")) and not isinstance(node.get("write_scope"), dict):
+                errors.append({"code": "missing_write_scope", "node_id": node_id})
+            write_scope = node.get("write_scope") or {}
+            if write_scope and not isinstance(write_scope.get("allow"), list):
+                errors.append({"code": "invalid_write_scope", "node_id": node_id, "field": "allow"})
+        else:
+            on_fail = node.get("on_fail") or {}
+            if on_fail and (not isinstance(on_fail, dict) or ("retry" in on_fail and "max_retries" not in on_fail)):
+                errors.append({"code": "missing_max_retries", "node_id": node_id})
+            if isinstance(on_fail, dict) and on_fail.get("retry") and str(on_fail["retry"]) not in nodes:
+                errors.append({"code": "missing_retry_target", "node_id": node_id, "target": on_fail.get("retry")})
+    if not errors:
+        try:
+            workflow_topological_batches(nodes)
+        except OrchestratorError:
+            errors.append({"code": "cycle_detected"})
+    batches: list[list[str]] = []
+    if not errors:
+        batches = workflow_topological_batches(nodes)
+    return {
+        "ok": not errors,
+        "workflow": {"id": spec.get("id"), "description": spec.get("description")},
+        "node_count": len(nodes),
+        "edge_count": sum(len(normalize_list(node.get("needs"))) for node in nodes.values()),
+        "batches": batches,
+        "errors": errors,
+    }
+
+
+def workflow_validate(file: str | Path, cwd: Path | None = None) -> dict[str, Any]:
+    spec = load_workflow_spec(file, cwd=cwd)
+    result = validate_workflow_spec(spec)
+    result["source_file"] = spec.get("_source_file")
+    return result
+
+
+def workflow_dry_run(file: str | Path, task: str | None = None, cwd: Path | None = None) -> dict[str, Any]:
+    spec = load_workflow_spec(file, cwd=cwd)
+    validation = validate_workflow_spec(spec)
+    if not validation.get("ok"):
+        return {**validation, "source_file": spec.get("_source_file"), "launched_workers": 0}
+    nodes = workflow_nodes(spec)
+    batches = validation["batches"]
+    fan_out = {node_id: sorted(workflow_descendants(nodes, node_id)) for node_id in nodes}
+    return {
+        "ok": True,
+        "source_file": spec.get("_source_file"),
+        "task": task,
+        "cwd": str(cwd or Path.cwd()),
+        "workflow_id": spec.get("id"),
+        "batches": batches,
+        "execution_order": [node_id for batch in batches for node_id in batch],
+        "fan_out": fan_out,
+        "fan_in": {node_id: [str(item) for item in normalize_list(node.get("needs"))] for node_id, node in nodes.items()},
+        "launched_workers": 0,
+    }
+
+
+def new_workflow_id() -> str:
+    return "wf-" + new_run_id()
+
+
+def register_workflow_dir(workflow_id: str, workflow_dir: Path, workspace_root: Path, artifact_root: Path) -> None:
+    WORKFLOW_INDEX_DIR.mkdir(parents=True, exist_ok=True)
+    write_json_file(
+        WORKFLOW_INDEX_DIR / f"{workflow_id}.json",
+        {
+            "workflow_id": workflow_id,
+            "workflow_dir": str(workflow_dir.resolve()),
+            "workspace_root": str(workspace_root.resolve()),
+            "artifact_root": str(artifact_root.resolve()),
+            "registered_at": utc_now_iso(),
+        },
+    )
+
+
+def safe_workflow_dir(workflow_id: str, cwd: Path | None = None) -> Path:
+    if not WORKFLOW_ID_RE.match(workflow_id):
+        raise OrchestratorError(f"Invalid workflow id: {workflow_id}")
+    paths = workspace_paths(cwd) if cwd else None
+    candidates: list[Path] = []
+    if paths:
+        candidates.append((paths["workflows"] / workflow_id).resolve())
+    candidates.append((WORKFLOWS_DIR / workflow_id).resolve())
+    index_path = WORKFLOW_INDEX_DIR / f"{workflow_id}.json"
+    if index_path.exists():
+        index = read_json_file(index_path, {})
+        return validate_indexed_workflow_dir(workflow_id, index, index_path)
+    for candidate in candidates:
+        if candidate.exists() and candidate.name == workflow_id:
+            return candidate
+    return candidates[0]
+
+
+def validate_indexed_workflow_dir(workflow_id: str, index: dict[str, Any], index_path: Path) -> Path:
+    if not isinstance(index, dict) or not index:
+        raise OrchestratorError(f"Invalid workflow index: {index_path}")
+    if str(index.get("workflow_id") or "") != workflow_id:
+        raise OrchestratorError(f"Workflow index id mismatch: {index_path}")
+    missing = [key for key in ("workflow_dir", "workspace_root", "artifact_root") if not index.get(key)]
+    if missing:
+        raise OrchestratorError(f"Workflow index missing {', '.join(missing)}: {index_path}")
+    workspace_root = Path(str(index["workspace_root"])).expanduser().resolve()
+    artifact_root = Path(str(index["artifact_root"])).expanduser().resolve()
+    workflow_dir = Path(str(index["workflow_dir"])).expanduser().resolve()
+    expected_artifact_root = (workspace_root / AGENT_WORKSPACE_DIRNAME / ARTIFACT_NAMESPACE).resolve()
+    if artifact_root != expected_artifact_root:
+        raise OrchestratorError(f"Workflow index artifact root does not match workspace root: {index_path}")
+    workflows_root = (artifact_root / "workflows").resolve()
+    try:
+        workflow_dir.relative_to(workflows_root)
+    except ValueError as exc:
+        raise OrchestratorError(f"Indexed workflow dir resolves outside artifact workflows root: {index_path}") from exc
+    if workflow_dir.name != workflow_id:
+        raise OrchestratorError(f"Indexed workflow dir name does not match workflow id: {index_path}")
+    if not workflow_dir.exists():
+        raise OrchestratorError(f"Indexed workflow dir does not exist: {workflow_dir}")
+    return workflow_dir
+
+
+def write_workflow_status(workflow_dir: Path, status: dict[str, Any]) -> Path:
+    status["updated_at"] = utc_now_iso()
+    return write_json_file(workflow_dir / "status.json", status)
+
+
+def read_workflow_status(workflow_id: str, cwd: Path | None = None) -> dict[str, Any]:
+    workflow_dir = safe_workflow_dir(workflow_id, cwd=cwd)
+    status = read_json_file(workflow_dir / "status.json", {})
+    if not status:
+        raise OrchestratorError(f"Workflow status not found: {workflow_id}")
+    return status
+
+
+def workflow_mock_handoff(node_id: str, node: dict[str, Any], run_id: str, status_value: str) -> dict[str, Any]:
+    role = str(node.get("role") or "testing")
+    handoff = handoff_template(role)["example"]
+    handoff.update(
+        {
+            "run_id": run_id,
+            "node_id": node_id,
+            "role": role,
+            "status": status_value,
+            "summary": f"Mock {node_id} completed with status {status_value}.",
+            "blocking_issues": [] if status_value == "pass" else [{"severity": "high", "description": "Mock failure"}],
+        }
+    )
+    return handoff
+
+
+def create_mock_workflow_run_node(paths: dict[str, Path], workflow_dir: Path, workflow_id: str, node_id: str, node: dict[str, Any], attempt: int) -> dict[str, Any]:
+    sequence = normalize_list(node.get("mock_status_sequence")) or [node.get("mock_status") or "pass"]
+    status_value = str(sequence[min(attempt, len(sequence) - 1)] or "pass")
+    run_id = new_run_id()
+    run_dir = paths["runs"] / run_id
+    run_dir.mkdir(parents=True, exist_ok=False)
+    register_run_dir(run_id, run_dir, paths["workspace_root"], paths["artifact_root"])
+    handoff = workflow_mock_handoff(node_id, node, run_id, status_value)
+    if node.get("mock_missing_handoff"):
+        for field in normalize_list(node.get("mock_missing_handoff")):
+            handoff.pop(str(field), None)
+    validation = validate_handoff_data(handoff, role=str(node.get("role") or "testing"))
+    metadata = {
+        "run_id": run_id,
+        "workflow_id": workflow_id,
+        "workflow_node_id": node_id,
+        "started_at": utc_now_iso(),
+        "finished_at": utc_now_iso(),
+        "status": "succeeded" if validation.get("ok") and status_value == "pass" else "failed",
+        "role": node.get("role"),
+        "actual_model": "mock-workflow-model",
+        "actual_input_tokens": 123,
+        "actual_output_tokens": 45,
+        "actual_total_tokens": 168,
+        "actual_cost_usd": 0.99,
+    }
+    write_metadata(run_dir, metadata)
+    (run_dir / "stdout.txt").write_text(f"mock workflow node {node_id}: {status_value}\n", encoding="utf-8")
+    (run_dir / "stderr.txt").write_text("", encoding="utf-8")
+    write_json_file(run_dir / "handoff.json", handoff)
+    write_json_file(run_dir / "handoff.validation.json", validation)
+    node_dir = workflow_dir / "nodes" / node_id
+    node_dir.mkdir(parents=True, exist_ok=True)
+    (node_dir / "run_id.txt").write_text(run_id, encoding="utf-8")
+    write_json_file(node_dir / "handoff.json", handoff)
+    write_json_file(node_dir / "validation.json", validation)
+    return {"run_id": run_id, "handoff": handoff, "validation": validation, "status_value": status_value}
+
+
+def workflow_condition_value(status: dict[str, Any], node_id: str, field: str) -> Any:
+    node = (status.get("nodes") or {}).get(node_id) or {}
+    handoff = node.get("handoff") or {}
+    if field == "status":
+        return handoff.get("status") or node.get("handoff_status") or node.get("state")
+    if field == "blocking_count":
+        validation = node.get("handoff_validation") or {}
+        return validation.get("blocking_count", len(handoff.get("blocking_issues") or []))
+    return handoff.get(field)
+
+
+def evaluate_workflow_gate(node_id: str, node: dict[str, Any], status: dict[str, Any]) -> dict[str, Any]:
+    conditions = [str(item) for item in normalize_list(node.get("pass_when"))]
+    if not conditions:
+        conditions = [f"{dep}.status == \"pass\"" for dep in normalize_list(node.get("needs"))]
+    results: list[dict[str, Any]] = []
+    ok = True
+    for condition in conditions:
+        match = re.match(r"^([A-Za-z0-9_.-]+)\.([A-Za-z0-9_]+)\s*==\s*(?:\"([^\"]*)\"|'([^']*)'|([0-9]+))$", condition.strip())
+        if not match:
+            results.append({"condition": condition, "ok": False, "error": "unsupported_condition"})
+            ok = False
+            continue
+        source_node, field, expected_text, expected_single, expected_number = match.groups()
+        actual = workflow_condition_value(status, source_node, field)
+        expected: Any = int(expected_number) if expected_number is not None else (expected_text if expected_text is not None else expected_single)
+        passed = actual == expected
+        results.append({"condition": condition, "source_node": source_node, "field": field, "expected": expected, "actual": actual, "ok": passed})
+        ok = ok and passed
+    return {"ok": ok, "node_id": node_id, "checks": results}
+
+
+def workflow_write_report(workflow_id: str, cwd: Path | None = None) -> dict[str, Any]:
+    workflow_dir = safe_workflow_dir(workflow_id, cwd=cwd)
+    status = read_json_file(workflow_dir / "status.json", {})
+    if not status:
+        raise OrchestratorError(f"Workflow status not found: {workflow_id}")
+    report_dir = workflow_dir / "reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    path = report_dir / "workflow-report.md"
+    lines = [
+        "# Workflow Report",
+        "",
+        f"- Workflow id: `{workflow_id}`",
+        f"- Status: `{status.get('status')}`",
+        f"- Task: `{status.get('task')}`",
+        "",
+        "## Nodes",
+    ]
+    for node_id, node in (status.get("nodes") or {}).items():
+        lines.extend(
+            [
+                f"- `{node_id}`: state `{node.get('state')}`, run `{node.get('run_id')}`, handoff `{bool((node.get('handoff_validation') or {}).get('ok'))}`",
+                f"  - tokens `{node.get('actual_total_tokens')}`, cost `{node.get('actual_cost_usd')}`",
+            ]
+        )
+        if node.get("gate"):
+            lines.append(f"  - gate: `{json.dumps(node['gate'], ensure_ascii=False)}`")
+    lines.extend(["", "## Decision Trail"])
+    for decision in status.get("decisions") or []:
+        lines.append(f"- `{decision.get('ts')}` `{decision.get('node_id')}` -> `{decision.get('decision')}`: {decision.get('reason')}")
+    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    return {"ok": True, "workflow_id": workflow_id, "status": status.get("status"), "report_path": str(path)}
+
+
+def workflow_run(file: str | Path, task: str, cwd: Path | None = None, mock: bool = False, loop_guard: int = 50) -> dict[str, Any]:
+    if not mock:
+        raise OrchestratorError("Real workflow-run is not enabled in v0.7.0. Use --mock to validate the controller without spending model quota.")
+    spec = load_workflow_spec(file, cwd=cwd)
+    validation = validate_workflow_spec(spec)
+    if not validation.get("ok"):
+        return {**validation, "source_file": spec.get("_source_file")}
+    paths = workspace_paths(cwd or Path.cwd())
+    workflow_id = new_workflow_id()
+    workflow_dir = paths["workflows"] / workflow_id
+    workflow_dir.mkdir(parents=True, exist_ok=False)
+    register_workflow_dir(workflow_id, workflow_dir, paths["workspace_root"], paths["artifact_root"])
+    nodes = workflow_nodes(spec)
+    source_text = str(spec.get("_source_text") or json.dumps({k: v for k, v in spec.items() if not str(k).startswith("_")}, ensure_ascii=False, indent=2))
+    (workflow_dir / "workflow.yaml").write_text(source_text, encoding="utf-8")
+    manifest = {
+        "workflow_id": workflow_id,
+        "source_file": spec.get("_source_file"),
+        "task": task,
+        "cwd": str((cwd or Path.cwd()).resolve()),
+        "mock": mock,
+        "created_at": utc_now_iso(),
+    }
+    write_json_file(workflow_dir / "manifest.json", manifest)
+    status: dict[str, Any] = {
+        "workflow_id": workflow_id,
+        "status": "running",
+        "task": task,
+        "cwd": manifest["cwd"],
+        "mock": mock,
+        "created_at": utc_now_iso(),
+        "nodes": {
+            node_id: {
+                "state": "pending",
+                "type": str(node.get("type") or "worker"),
+                "role": node.get("role"),
+                "needs": [str(item) for item in normalize_list(node.get("needs"))],
+                "attempts": 0,
+                "retry_count": 0,
+            }
+            for node_id, node in nodes.items()
+        },
+        "decisions": [],
+    }
+    batches = workflow_topological_batches(nodes)
+    order = [node_id for batch in batches for node_id in batch]
+    transitions = 0
+    while transitions < loop_guard:
+        progress = False
+        transitions += 1
+        for node_id in order:
+            node = nodes[node_id]
+            node_state = status["nodes"][node_id]
+            node_type = str(node.get("type") or "worker")
+            if node_state.get("state") in {"done", "failed", "blocked", "cancelled", "skipped"}:
+                continue
+            needs = [str(item) for item in normalize_list(node.get("needs"))]
+            dep_states = {dep: status["nodes"][dep].get("state") for dep in needs}
+            if node_type == "gate":
+                if not all(state in {"done", "failed", "skipped"} for state in dep_states.values()):
+                    continue
+            else:
+                failed_deps = [dep for dep, state in dep_states.items() if state in {"failed", "blocked", "cancelled"}]
+                if failed_deps:
+                    node_state["state"] = "blocked"
+                    status["decisions"].append(
+                        {
+                            "ts": utc_now_iso(),
+                            "node_id": node_id,
+                            "decision": "block",
+                            "reason": "dependency failed or blocked",
+                            "failed_dependencies": failed_deps,
+                            "requires_codex_takeover": True,
+                        }
+                    )
+                    progress = True
+                    continue
+                if not all(state in {"done", "skipped"} for state in dep_states.values()):
+                    continue
+            if node_type == "gate":
+                node_state["state"] = "validating"
+                gate = evaluate_workflow_gate(node_id, node, status)
+                node_state["gate"] = gate
+                if gate.get("ok"):
+                    node_state["state"] = "done"
+                    decision = {"ts": utc_now_iso(), "node_id": node_id, "decision": "advance", "reason": "gate passed", "next_nodes": []}
+                    status["decisions"].append(decision)
+                    progress = True
+                    continue
+                on_fail = node.get("on_fail") or {}
+                retry_target = str(on_fail.get("retry") or "") if isinstance(on_fail, dict) else ""
+                max_retries = int(on_fail.get("max_retries") or 0) if isinstance(on_fail, dict) else 0
+                if retry_target and node_state.get("retry_count", 0) < max_retries:
+                    node_state["retry_count"] = int(node_state.get("retry_count") or 0) + 1
+                    invalidated = {retry_target, *workflow_descendants(nodes, retry_target)}
+                    for item in invalidated:
+                        status["nodes"][item]["state"] = "pending"
+                        status["nodes"][item].pop("run_id", None)
+                    decision = {"ts": utc_now_iso(), "node_id": node_id, "decision": "retry", "reason": "gate failed", "next_nodes": [retry_target], "retry_count": node_state["retry_count"], "requires_codex_takeover": False}
+                    status["decisions"].append(decision)
+                    progress = True
+                    break
+                node_state["state"] = "blocked"
+                decision = {"ts": utc_now_iso(), "node_id": node_id, "decision": "block", "reason": "gate failed and retries exhausted", "next_nodes": [], "retry_count": node_state.get("retry_count", 0), "requires_codex_takeover": True}
+                status["decisions"].append(decision)
+                progress = True
+                continue
+            if not mock:
+                node_state["state"] = "queued"
+                run = run_streaming_agent(
+                    task=f"{task}\n\nWorkflow node {node_id}: {node.get('task') or ''}",
+                    role=str(node.get("role") or "implementation"),
+                    cwd=cwd or Path.cwd(),
+                    timeout_seconds=int(node.get("timeout_seconds") or (spec.get("defaults") or {}).get("timeout_seconds") or 900),
+                    allow_write=bool(node.get("allow_write", False)),
+                    final_only=bool((spec.get("defaults") or {}).get("final_only", True)),
+                    max_output_bytes=int((spec.get("defaults") or {}).get("max_output_bytes") or OUTPUT_BUDGET_DEFAULTS["max_output_bytes"]),
+                    max_events_bytes=int((spec.get("defaults") or {}).get("max_events_bytes") or OUTPUT_BUDGET_DEFAULTS["max_events_bytes"]),
+                )
+                node_state.update({"state": "running", "run_id": run["run_id"]})
+                status["decisions"].append({"ts": utc_now_iso(), "node_id": node_id, "decision": "advance", "reason": "worker launched", "next_nodes": []})
+                progress = True
+                continue
+            attempt = int(node_state.get("attempts") or 0)
+            node_state["state"] = "running"
+            result = create_mock_workflow_run_node(paths, workflow_dir, workflow_id, node_id, node, attempt)
+            node_state["attempts"] = attempt + 1
+            node_state["run_id"] = result["run_id"]
+            node_state["handoff"] = result["handoff"]
+            node_state["handoff_validation"] = result["validation"]
+            node_state["handoff_status"] = result["handoff"].get("status")
+            node_state["actual_total_tokens"] = 168
+            node_state["actual_cost_usd"] = 0.99
+            if not result["validation"].get("ok"):
+                node_state["state"] = "blocked"
+                status["decisions"].append({"ts": utc_now_iso(), "node_id": node_id, "decision": "block", "reason": "handoff validation failed", "missing_fields": result["validation"].get("missing_fields"), "requires_codex_takeover": True})
+            elif result["handoff"].get("status") == "pass":
+                node_state["state"] = "done"
+                status["decisions"].append({"ts": utc_now_iso(), "node_id": node_id, "decision": "advance", "reason": "handoff valid", "next_nodes": []})
+            else:
+                node_state["state"] = "failed"
+                status["decisions"].append({"ts": utc_now_iso(), "node_id": node_id, "decision": "advance", "reason": "handoff status failed; gate may retry", "next_nodes": []})
+            progress = True
+        write_workflow_status(workflow_dir, status)
+        if not progress:
+            break
+        if all(item.get("state") in {"done", "blocked", "cancelled", "skipped"} for item in status["nodes"].values()):
+            break
+    if transitions >= loop_guard:
+        status["status"] = "blocked"
+        status["block_reason"] = "loop_guard_exceeded"
+        status["decisions"].append({"ts": utc_now_iso(), "node_id": None, "decision": "block", "reason": "loop_guard_exceeded", "requires_codex_takeover": True})
+    elif any(item.get("state") == "blocked" for item in status["nodes"].values()):
+        status["status"] = "blocked"
+    elif any(item.get("state") in {"running", "queued", "pending", "failed"} for item in status["nodes"].values()):
+        status["status"] = "waiting_for_controller"
+    else:
+        status["status"] = "succeeded"
+    write_workflow_status(workflow_dir, status)
+    report = workflow_write_report(workflow_id, cwd=cwd)
+    return {"ok": status["status"] == "succeeded", "workflow_id": workflow_id, "status": status, "workflow_dir": str(workflow_dir), "report_path": report.get("report_path")}
+
+
+def workflow_status(workflow_id: str, cwd: Path | None = None) -> dict[str, Any]:
+    status = read_workflow_status(workflow_id, cwd=cwd)
+    return {"ok": True, "workflow_id": workflow_id, "status": status.get("status"), "nodes": status.get("nodes"), "decisions": status.get("decisions"), "path": str(safe_workflow_dir(workflow_id, cwd=cwd) / "status.json")}
+
+
+def workflow_retry_node(workflow_id: str, node_id: str, cwd: Path | None = None) -> dict[str, Any]:
+    workflow_dir = safe_workflow_dir(workflow_id, cwd=cwd)
+    status = read_json_file(workflow_dir / "status.json", {})
+    spec = load_workflow_spec(workflow_dir / "workflow.yaml")
+    nodes = workflow_nodes(spec)
+    if node_id not in nodes:
+        raise OrchestratorError(f"Unknown workflow node: {node_id}")
+    invalidated = {node_id, *workflow_descendants(nodes, node_id)}
+    for item in invalidated:
+        if item in status.get("nodes", {}):
+            status["nodes"][item]["state"] = "pending"
+            status["nodes"][item].pop("run_id", None)
+    status.setdefault("decisions", []).append({"ts": utc_now_iso(), "node_id": node_id, "decision": "retry", "reason": "manual retry requested", "next_nodes": [node_id]})
+    write_workflow_status(workflow_dir, status)
+    return {"ok": True, "workflow_id": workflow_id, "node_id": node_id, "invalidated": sorted(invalidated), "status_path": str(workflow_dir / "status.json")}
+
+
+def workflow_stop(workflow_id: str, force: bool = False, cwd: Path | None = None) -> dict[str, Any]:
+    workflow_dir = safe_workflow_dir(workflow_id, cwd=cwd)
+    status = read_json_file(workflow_dir / "status.json", {})
+    stopped: list[dict[str, Any]] = []
+    for node_id, node in (status.get("nodes") or {}).items():
+        if node.get("state") == "running" and node.get("run_id"):
+            stopped.append({"node_id": node_id, "stop": stop_run(str(node["run_id"]), force=force)})
+            node["state"] = "cancelled"
+    status["status"] = "cancelled"
+    status.setdefault("decisions", []).append({"ts": utc_now_iso(), "node_id": None, "decision": "cancel", "reason": "workflow-stop requested", "requires_codex_takeover": True})
+    write_workflow_status(workflow_dir, status)
+    return {"ok": True, "workflow_id": workflow_id, "stopped": stopped, "status": "cancelled"}
+
+
 def default_auto_policy() -> dict[str, Any]:
     return {
         "default_profile": "auto",
@@ -6117,6 +6853,137 @@ def selftest() -> dict[str, Any]:
                 "src/app.py",
             ],
         )
+        valid_workflow = {
+            "schema_version": 1,
+            "id": "mock-safe-refactor",
+            "defaults": {"final_only": True, "timeout_seconds": 30, "allow_write": False},
+            "nodes": {
+                "requirements": {"role": "requirements", "task": "mock requirements", "outputs": "requirements_handoff"},
+                "implementation": {
+                    "role": "development",
+                    "needs": ["requirements"],
+                    "allow_write": True,
+                    "write_scope": {"allow": ["src/", "tests/"], "deny": [".env", ".env.*"], "max_diff_lines": 800},
+                    "outputs": "implementation_handoff",
+                },
+                "testing": {"role": "testing", "needs": ["implementation"], "outputs": "testing_handoff", "mock_status_sequence": ["fail", "pass"]},
+                "review": {"role": "review", "needs": ["implementation"], "outputs": "review_handoff"},
+                "quality_gate": {
+                    "type": "gate",
+                    "needs": ["testing", "review"],
+                    "pass_when": ['testing.status == "pass"', "review.blocking_count == 0"],
+                    "on_fail": {"retry": "implementation", "max_retries": 2},
+                },
+                "supervisor": {"role": "supervisor", "needs": ["quality_gate"], "outputs": "supervisor_handoff"},
+            },
+        }
+        workflow_path = Path(tmp) / "workflow.json"
+        write_json_file(workflow_path, valid_workflow)
+        workflow_project_cwd = Path(tmp) / "workflow-project"
+        workflow_project_cwd.mkdir()
+        outside_workflow_path = Path(tmp) / "outside-workflow.json"
+        write_json_file(outside_workflow_path, valid_workflow)
+        try:
+            workflow_validate(outside_workflow_path, cwd=workflow_project_cwd)
+            workflow_cwd_scope_rejected = False
+        except OrchestratorError:
+            workflow_cwd_scope_rejected = True
+        simple_yaml_parsed = parse_simple_workflow_yaml(
+            """
+schema_version: 1
+id: fallback
+nodes:
+  requirements:
+    role: requirements
+    outputs: requirements_handoff
+  testing:
+    role: testing
+    needs: [requirements]
+    outputs: testing_handoff
+  quality_gate:
+    type: gate
+    needs: [testing]
+    pass_when:
+      - testing.status == "pass"
+"""
+        )
+        simple_yaml_validation = validate_workflow_spec(simple_yaml_parsed)
+        source_dir = Path(tmp) / "src"
+        source_dir.mkdir()
+        source_file = source_dir / "app.py"
+        source_file.write_text("print('stable')\n", encoding="utf-8")
+        source_before = source_file.read_text(encoding="utf-8")
+        workflow_valid = validate_workflow_spec(valid_workflow)
+        workflow_dry = workflow_dry_run(workflow_path, task="mock task", cwd=Path(tmp))
+        workflow_mock = workflow_run(workflow_path, task="mock task", cwd=Path(tmp), mock=True)
+        workflow_mock_status = workflow_status(str(workflow_mock.get("workflow_id")), cwd=Path(tmp))
+        workflow_report_text = Path(str(workflow_mock.get("report_path"))).read_text(encoding="utf-8")
+        workflow_id = str(workflow_mock.get("workflow_id"))
+        workflow_dir = safe_workflow_dir(workflow_id, cwd=Path(tmp))
+        tampered_workflow_dir = Path(tmp) / "outside-workflow-index" / workflow_id
+        tampered_workflow_dir.mkdir(parents=True, exist_ok=True)
+        write_json_file(
+            WORKFLOW_INDEX_DIR / f"{workflow_id}.json",
+            {
+                "workflow_id": workflow_id,
+                "workflow_dir": str(tampered_workflow_dir.resolve()),
+                "workspace_root": str(Path(tmp).resolve()),
+                "artifact_root": str(workspace_paths(Path(tmp))["artifact_root"].resolve()),
+                "registered_at": utc_now_iso(),
+            },
+        )
+        try:
+            safe_workflow_dir(workflow_id, cwd=Path(tmp))
+            tampered_workflow_index_rejected = False
+        except OrchestratorError:
+            tampered_workflow_index_rejected = True
+        register_workflow_dir(workflow_id, workflow_dir, workspace_paths(Path(tmp))["workspace_root"], workspace_paths(Path(tmp))["artifact_root"])
+        try:
+            workflow_run(workflow_path, task="real workflow should be disabled", cwd=Path(tmp), mock=False)
+            real_workflow_run_rejected = False
+        except OrchestratorError:
+            real_workflow_run_rejected = True
+        source_after = source_file.read_text(encoding="utf-8")
+
+        cycle_spec = json.loads(json.dumps(valid_workflow))
+        cycle_spec["nodes"]["requirements"]["needs"] = ["supervisor"]
+        cycle_validation = validate_workflow_spec(cycle_spec)
+        unknown_role_spec = json.loads(json.dumps(valid_workflow))
+        unknown_role_spec["nodes"]["testing"]["role"] = "unknown"
+        unknown_role_validation = validate_workflow_spec(unknown_role_spec)
+        missing_dep_spec = json.loads(json.dumps(valid_workflow))
+        missing_dep_spec["nodes"]["testing"]["needs"] = ["missing"]
+        missing_dep_validation = validate_workflow_spec(missing_dep_spec)
+        missing_outputs_spec = json.loads(json.dumps(valid_workflow))
+        missing_outputs_spec["nodes"]["testing"].pop("outputs", None)
+        missing_outputs_validation = validate_workflow_spec(missing_outputs_spec)
+        missing_write_scope_spec = json.loads(json.dumps(valid_workflow))
+        missing_write_scope_spec["nodes"]["implementation"].pop("write_scope", None)
+        missing_write_scope_validation = validate_workflow_spec(missing_write_scope_spec)
+
+        handoff_test_template = handoff_template("testing")
+        valid_handoff = handoff_test_template["example"]
+        valid_handoff_result = validate_handoff_data(valid_handoff, role="testing")
+        invalid_handoff = json.loads(json.dumps(valid_handoff))
+        invalid_handoff.pop("status", None)
+        invalid_handoff_result = validate_handoff_data(invalid_handoff, role="testing")
+
+        missing_handoff_spec = json.loads(json.dumps(valid_workflow))
+        missing_handoff_spec["nodes"]["requirements"]["mock_missing_handoff"] = ["status"]
+        missing_handoff_path = Path(tmp) / "missing-handoff-workflow.json"
+        write_json_file(missing_handoff_path, missing_handoff_spec)
+        missing_handoff_run = workflow_run(missing_handoff_path, task="mock missing handoff", cwd=Path(tmp), mock=True)
+        missing_handoff_nodes = (missing_handoff_run.get("status") or {}).get("nodes") or {}
+
+        max_retry_spec = json.loads(json.dumps(valid_workflow))
+        max_retry_spec["nodes"]["testing"]["mock_status_sequence"] = ["fail", "fail", "fail"]
+        max_retry_spec["nodes"]["quality_gate"]["on_fail"]["max_retries"] = 1
+        max_retry_path = Path(tmp) / "max-retry-workflow.json"
+        write_json_file(max_retry_path, max_retry_spec)
+        max_retry_run = workflow_run(max_retry_path, task="mock max retry", cwd=Path(tmp), mock=True)
+        max_retry_status = max_retry_run.get("status") or {}
+        max_retry_nodes = max_retry_status.get("nodes") or {}
+        max_retry_decisions = max_retry_status.get("decisions") or []
     checks = {
         "utf8_env": env.get("PYTHONIOENCODING") == "utf-8" and env.get("PYTHONUTF8") == "1",
         "timeout_bytes_decode": decoded == "中文✅",
@@ -6142,6 +7009,33 @@ def selftest() -> dict[str, Any]:
         "worker_env_artifact_root": worker_env.get("CC_ORCHESTRATOR_ARTIFACT_ROOT") == str(ARTIFACT_ROOT),
         "folder_policy_generated_only": "Only manage agent-generated artifacts" in str(policy.get("policy", {}).get("principle", "")),
         "clean_workspace_preserves_scaffold": clean_after_init.get("action_count") == 0,
+        "workflow_validate_accepts_valid_dag": workflow_valid.get("ok") and workflow_valid.get("node_count") == 6 and workflow_valid.get("edge_count", 0) >= 5,
+        "workflow_validate_rejects_outside_cwd": workflow_cwd_scope_rejected,
+        "workflow_simple_yaml_fallback_parser": simple_yaml_validation.get("ok") and simple_yaml_validation.get("node_count") == 3,
+        "workflow_validate_rejects_cycle": any(item.get("code") == "cycle_detected" for item in cycle_validation.get("errors", [])),
+        "workflow_validate_rejects_unknown_role": any(item.get("code") == "unknown_role" for item in unknown_role_validation.get("errors", [])),
+        "workflow_validate_rejects_missing_needs": any(item.get("code") == "missing_dependency" for item in missing_dep_validation.get("errors", [])),
+        "workflow_validate_requires_outputs": any(item.get("code") == "missing_outputs" for item in missing_outputs_validation.get("errors", [])),
+        "workflow_validate_requires_write_scope_for_write_node": any(item.get("code") == "missing_write_scope" for item in missing_write_scope_validation.get("errors", [])),
+        "workflow_dry_run_has_topological_batches": workflow_dry.get("batches") == [["requirements"], ["implementation"], ["review", "testing"], ["quality_gate"], ["supervisor"]],
+        "workflow_dry_run_launches_no_workers": workflow_dry.get("launched_workers") == 0,
+        "handoff_template_testing_is_valid": "tests_run" in handoff_test_template.get("schema", {}).get("required", []),
+        "handoff_validate_accepts_valid_handoff": bool(valid_handoff_result.get("ok")),
+        "handoff_validate_reports_missing_fields": not invalid_handoff_result.get("ok") and "status" in invalid_handoff_result.get("missing_fields", []),
+        "workflow_mock_run_succeeds": workflow_mock.get("ok") and workflow_mock.get("status", {}).get("status") == "succeeded",
+        "workflow_tampered_index_rejected": tampered_workflow_index_rejected,
+        "workflow_real_run_requires_mock": real_workflow_run_rejected,
+        "mock_5_node_fanout_join_ok": (workflow_mock_status.get("nodes") or {}).get("quality_gate", {}).get("state") == "done" and (workflow_mock_status.get("nodes") or {}).get("testing", {}).get("attempts") == 2,
+        "retry_once_then_pass": any(decision.get("decision") == "retry" and decision.get("retry_count") == 1 for decision in workflow_mock_status.get("decisions") or []) and workflow_mock_status.get("status") == "succeeded",
+        "max_retries_blocks": max_retry_status.get("status") == "blocked"
+        and max_retry_nodes.get("testing", {}).get("attempts") == 2
+        and max_retry_nodes.get("quality_gate", {}).get("retry_count") == 1
+        and max_retry_status.get("block_reason") != "loop_guard_exceeded"
+        and any(decision.get("decision") == "block" and "retries exhausted" in str(decision.get("reason")) for decision in max_retry_decisions),
+        "missing_handoff_blocks_downstream": missing_handoff_run.get("status", {}).get("status") == "blocked" and missing_handoff_nodes.get("requirements", {}).get("state") == "blocked" and not missing_handoff_nodes.get("implementation", {}).get("run_id"),
+        "workflow_status_has_gate_details": bool((workflow_mock_status.get("nodes") or {}).get("quality_gate", {}).get("gate")),
+        "workflow_report_has_decision_trail": "## Decision Trail" in workflow_report_text and "`retry`" in workflow_report_text,
+        "workflow_controller_only_no_source_changes": source_before == source_after,
     }
     return {
         "ok": all(checks.values()),
@@ -6493,6 +7387,42 @@ def main() -> int:
     workflow = sub.add_parser("workflow-plan")
     workflow.add_argument("task")
     workflow.add_argument("--cwd")
+    workflow_validate_cmd = sub.add_parser("workflow-validate")
+    workflow_validate_cmd.add_argument("--file", required=True)
+    workflow_validate_cmd.add_argument("--cwd")
+    workflow_dry_cmd = sub.add_parser("workflow-dry-run")
+    workflow_dry_cmd.add_argument("--file", required=True)
+    workflow_dry_cmd.add_argument("--task")
+    workflow_dry_cmd.add_argument("--cwd")
+    workflow_run_cmd = sub.add_parser("workflow-run")
+    workflow_run_cmd.add_argument("--file", required=True)
+    workflow_run_cmd.add_argument("--task", required=True)
+    workflow_run_cmd.add_argument("--cwd")
+    workflow_run_cmd.add_argument("--mock", action="store_true")
+    workflow_run_cmd.add_argument("--loop-guard", type=int, default=50)
+    workflow_status_cmd = sub.add_parser("workflow-status")
+    workflow_status_cmd.add_argument("--workflow-id", required=True)
+    workflow_status_cmd.add_argument("--cwd")
+    workflow_retry_cmd = sub.add_parser("workflow-retry-node")
+    workflow_retry_cmd.add_argument("--workflow-id", required=True)
+    workflow_retry_cmd.add_argument("--node-id", required=True)
+    workflow_retry_cmd.add_argument("--cwd")
+    workflow_stop_cmd = sub.add_parser("workflow-stop")
+    workflow_stop_cmd.add_argument("--workflow-id", required=True)
+    workflow_stop_cmd.add_argument("--cwd")
+    workflow_stop_cmd.add_argument("--force", action="store_true")
+    workflow_report_cmd = sub.add_parser("workflow-report")
+    workflow_report_cmd.add_argument("--workflow-id", required=True)
+    workflow_report_cmd.add_argument("--cwd")
+    handoff_template_cmd = sub.add_parser("handoff-template")
+    handoff_template_cmd.add_argument("--role", default="testing")
+    handoff_validate_cmd = sub.add_parser("handoff-validate")
+    handoff_validate_cmd.add_argument("--run-id", required=True)
+    handoff_validate_cmd.add_argument("--schema")
+    handoff_read_cmd = sub.add_parser("handoff-read")
+    handoff_read_cmd.add_argument("--run-id", required=True)
+    handoff_repair_cmd = sub.add_parser("handoff-repair-prompt")
+    handoff_repair_cmd.add_argument("--run-id", required=True)
     sub.add_parser("score-models")
     sub.add_parser("write-auto-policy")
     reports = sub.add_parser("write-reports")
@@ -6781,6 +7711,28 @@ def main() -> int:
             print_json(git_diff(cwd=Path(args.cwd) if args.cwd else None))
         elif args.command == "workflow-plan":
             print_json(run_workflow_plan(args.task, cwd=Path(args.cwd) if args.cwd else None))
+        elif args.command == "workflow-validate":
+            print_json(workflow_validate(args.file, cwd=Path(args.cwd) if args.cwd else None))
+        elif args.command == "workflow-dry-run":
+            print_json(workflow_dry_run(args.file, task=args.task, cwd=Path(args.cwd) if args.cwd else None))
+        elif args.command == "workflow-run":
+            print_json(workflow_run(args.file, task=args.task, cwd=Path(args.cwd) if args.cwd else None, mock=args.mock, loop_guard=args.loop_guard))
+        elif args.command == "workflow-status":
+            print_json(workflow_status(args.workflow_id, cwd=Path(args.cwd) if args.cwd else None))
+        elif args.command == "workflow-retry-node":
+            print_json(workflow_retry_node(args.workflow_id, args.node_id, cwd=Path(args.cwd) if args.cwd else None))
+        elif args.command == "workflow-stop":
+            print_json(workflow_stop(args.workflow_id, force=args.force, cwd=Path(args.cwd) if args.cwd else None))
+        elif args.command == "workflow-report":
+            print_json(workflow_write_report(args.workflow_id, cwd=Path(args.cwd) if args.cwd else None))
+        elif args.command == "handoff-template":
+            print_json(handoff_template(args.role))
+        elif args.command == "handoff-validate":
+            print_json(handoff_validate(args.run_id, schema_path=args.schema))
+        elif args.command == "handoff-read":
+            print_json(handoff_read(args.run_id))
+        elif args.command == "handoff-repair-prompt":
+            print_json(handoff_repair_prompt(args.run_id))
         elif args.command == "score-models":
             print_json(score_models())
         elif args.command == "write-auto-policy":

@@ -59,6 +59,19 @@ docs/mcp.codex.example.toml
 | `cc_controller_report` | 导出总控验收和压测证据报告 |
 | `cc_pressure_report` | `cc_controller_report` 的压测报告别名 |
 | `cc_decision_review` | 审查 Codex 总控决策，返回 approve/revise/block |
+| `cc_workflow_validate` | 校验 YAML/JSON 工作流 DAG |
+| `cc_workflow_dry_run` | 不启动 worker，只看拓扑批次 |
+| `cc_workflow_run` | 运行工作流；`mock=true` 不花模型额度 |
+| `cc_workflow_status` | 查看节点状态、gate 细节和决策 |
+| `cc_workflow_retry_node` | 让指定节点和下游节点失效并准备重试 |
+| `cc_workflow_stop` | 取消工作流和正在跑的节点 |
+| `cc_workflow_report` | 写出带 decision trail 的工作流报告 |
+| `cc_handoff_template` | 返回角色 handoff schema 和示例 |
+| `cc_handoff_validate` | 校验 run 的 `handoff.json` |
+| `cc_handoff_read` | 读取 run 的 `handoff.json` |
+| `cc_handoff_repair_prompt` | 生成补齐 handoff 缺字段的 prompt |
+
+Workflow MCP 工具会把 workflow 文件限制在 `cwd` 或它托管的 `.agent-workspace` 内；不传 `cwd` 时，默认用 MCP server 当前项目目录。
 
 ## 默认安全策略
 

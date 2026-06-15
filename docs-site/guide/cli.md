@@ -59,6 +59,32 @@ Build a full workflow plan:
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" workflow-plan "Refactor this project safely"
 ```
 
+Validate and dry-run a reusable workflow DAG:
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" workflow-validate --file examples/workflows/safe-refactor.yaml --cwd /path/to/project
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" workflow-dry-run --file examples/workflows/safe-refactor.yaml --task "Refactor module X" --cwd /path/to/project
+```
+
+When `--cwd` is set, the workflow file must live inside that project or its managed `.agent-workspace`.
+
+Run the workflow controller in mock mode before spending model quota:
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" workflow-run --file examples/workflows/safe-refactor.yaml --task "Refactor module X" --cwd /path/to/project --mock
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" workflow-status --workflow-id WF_ID
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" workflow-report --workflow-id WF_ID
+```
+
+Use structured handoff contracts:
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" handoff-template --role testing
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" handoff-validate --run-id RUN_ID
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" handoff-read --run-id RUN_ID
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" handoff-repair-prompt --run-id RUN_ID
+```
+
 ## Model scoring and reports
 
 ```bash

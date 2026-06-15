@@ -90,9 +90,22 @@ docs/mcp.codex.example.toml
 | `cc_last_run` | Reads the latest run metadata and output tails |
 | `cc_git_diff` | Returns a capped git diff for review |
 | `cc_workflow_plan` | Builds the configured multi-agent workflow plan |
+| `cc_workflow_validate` | Validates a YAML/JSON workflow DAG |
+| `cc_workflow_dry_run` | Shows topological workflow batches without launching workers |
+| `cc_workflow_run` | Runs a workflow; use `mock=true` to avoid model quota |
+| `cc_workflow_status` | Reads workflow node state, gate details, and decisions |
+| `cc_workflow_retry_node` | Invalidates one node and downstream nodes for retry |
+| `cc_workflow_stop` | Cancels a workflow and active node runs |
+| `cc_workflow_report` | Writes a workflow report with decision trail |
+| `cc_handoff_template` | Returns a role-specific handoff schema and example |
+| `cc_handoff_validate` | Validates a run `handoff.json` |
+| `cc_handoff_read` | Reads a run `handoff.json` |
+| `cc_handoff_repair_prompt` | Builds a prompt for missing handoff fields |
 | `cc_write_claude_md` | Writes project instructions for Claude Code workers |
 | `cc_score_models` | Scores models discovered from CCSwitch |
 | `cc_write_strategy_reports` | Writes model score and strategy reports |
+
+Workflow MCP tools scope workflow files to `cwd` or its managed `.agent-workspace`; when `cwd` is omitted, the MCP server's current project directory is used.
 
 ## Safe defaults
 

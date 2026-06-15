@@ -59,6 +59,32 @@ python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" pick --role implementation --t
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" workflow-plan "Refactor this project safely"
 ```
 
+校验和预演可复用工作流 DAG：
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" workflow-validate --file examples/workflows/safe-refactor.yaml --cwd /path/to/project
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" workflow-dry-run --file examples/workflows/safe-refactor.yaml --task "Refactor module X" --cwd /path/to/project
+```
+
+设置 `--cwd` 后，workflow 文件必须在这个项目目录或它托管的 `.agent-workspace` 里。
+
+先用 mock 模式跑控制器，不花模型额度：
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" workflow-run --file examples/workflows/safe-refactor.yaml --task "Refactor module X" --cwd /path/to/project --mock
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" workflow-status --workflow-id WF_ID
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" workflow-report --workflow-id WF_ID
+```
+
+使用结构化 handoff 合约：
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" handoff-template --role testing
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" handoff-validate --run-id RUN_ID
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" handoff-read --run-id RUN_ID
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" handoff-repair-prompt --run-id RUN_ID
+```
+
 ## 模型评分和报告
 
 ```bash

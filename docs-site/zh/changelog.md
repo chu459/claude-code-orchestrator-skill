@@ -2,6 +2,15 @@
 
 这里记录 Claude Code Orchestrator Skill 的主要版本变化。
 
+## v0.7.0 - 工作流 DAG、handoff 合约、节点 gate
+
+- 新增 GitHub issues #20、#21、#22 的第一版工作流 DAG 控制层。
+- 新增 `workflow-validate`、`workflow-dry-run`、`workflow-run --mock`、`workflow-status`、`workflow-retry-node`、`workflow-stop`、`workflow-report`。v0.7.0 暂时只开放 mock DAG 执行。
+- 新增 `handoff-template`、`handoff-validate`、`handoff-read`、`handoff-repair-prompt`。
+- 补齐 workflow / handoff 对应 MCP 工具。
+- 新增 mock 控制器 gate：重试决策、超过重试阻断、缺 handoff 阻断下游、loop guard、decision trail 报告。
+- 新增 `examples/workflows/safe-refactor.yaml`。
+
 ## v0.6.4 - 用数据验证的 worker 管控修复
 
 - 修复 GitHub issues #16、#17、#18。
