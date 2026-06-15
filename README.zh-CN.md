@@ -24,7 +24,7 @@
   <a href="README.md"><img alt="Language: English" src="https://img.shields.io/badge/README-English-black"></a>
   <a href="README.md"><img alt="Default README: English" src="https://img.shields.io/badge/Default-English-blue"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-brightgreen"></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-v0.6.4-black">
+  <img alt="Version" src="https://img.shields.io/badge/version-v0.7.0-black">
   <img alt="Codex Skill" src="https://img.shields.io/badge/Codex-Skill-0A0A0A">
   <img alt="MCP Included" src="https://img.shields.io/badge/MCP-Included-blue">
   <img alt="CCSwitch" src="https://img.shields.io/badge/CCSwitch-Model_Router-purple">
@@ -80,11 +80,12 @@ Skill = Codex 的操作说明书
 <h2 align="center">更新日志</h2>
 
 <p align="center">
-  <b>当前版本：v0.6.4</b>
+  <b>当前版本：v0.7.0</b>
 </p>
 
 | 版本 | 更新内容 | 为什么重要 |
 | --- | --- | --- |
+| `v0.7.0` | 新增 GitHub issues #20、#21、#22 的第一版工作流 DAG 控制层：YAML/JSON 工作流校验、dry-run 拓扑批次、mock 工作流运行、结构化 handoff 模板与校验、节点 gate、重试决策、loop guard、workflow status/report 和 MCP 工具。 | Codex 现在可以把长任务拆成一组可验证的小节点，而不是塞进一段越来越含糊的长对话。第一版先用 mock 安全闭环，不花模型额度，也能拿数据证明控制器逻辑靠谱。 |
 | `v0.6.4` | 修复 GitHub issues #16、#17、#18：`final-only` 先过滤 raw stream 噪声再计算持久 stdout 预算；`--cwd` run 使用目标 cwd 自己的 artifact root，并用 run index 保证后续 poll；真实 token 聚合从 raw `modelUsage` 先计算，再做脱敏。 | Codex 现在有可验证的数据证据：短任务不会被 thinking/system 噪声提前打死，多个项目的 agent 产物不会串目录，usage/dashboard 也不会再显示假的 0 token。 |
 | `v0.6.3` | 修复 GitHub Actions 文档部署里的密钥扫描误报：selftest 里的占位 token 样例改成拆分字符串。 | 文档站可以正常发布 v0.6.x，不会把安全的占位示例误判成真实密钥。 |
 | `v0.6.2` | 修复 #15：捕获 Claude stream 里的 `modelUsage`，写成 `actual_model_usage`；metadata、dashboard、usage summary、控制报告都会区分“声明路由模型”和“实际计费模型”，并标出 `route_mismatch`。新增 `supervise-decision`，作为 `decision-review` 的兼容别名。 | Codex 现在能发现“看起来派了 A 模型，实际 Claude 用了 B 模型”的坑。路由、账单、报告都更可信。 |
@@ -99,6 +100,18 @@ Skill = Codex 的操作说明书
 | `v0.1.0` | 完成 Skill + MCP + CLI 基座：CCSwitch 发现、模型评分、角色路由、`CLAUDE.md` 生成、可视 Claude Code 窗口、日志和安全默认值。 | 证明核心思路：Codex 当大脑，Claude Code 当执行层，CCSwitch 当本地模型路由器。 |
 
 <h3 align="center">详细版本说明</h3>
+
+<details open>
+<summary><b>v0.7.0 - 工作流 DAG、handoff 合约、节点 gate</b></summary>
+
+- 实现 #20：新增 `workflow-validate`、`workflow-dry-run`、`workflow-run --mock`、`workflow-status`、`workflow-retry-node`、`workflow-stop`、`workflow-report`。v0.7.0 暂时只开放 mock DAG 执行，真实 worker DAG 执行等更多生产 gate 稳定后再打开。
+- 实现 #21：新增 `handoff-template`、`handoff-validate`、`handoff-read`、`handoff-repair-prompt`。
+- 实现 #22：新增 mock 节点控制器决策，支持 `advance`、`retry`、`block`、`cancel`、gate 检查、重试后下游失效、loop guard 阻断。
+- 补齐 workflow / handoff 对应 MCP 工具。
+- 新增 `examples/workflows/safe-refactor.yaml`。
+- selftest 新增 DAG 校验、handoff 校验、重试、超过重试阻断、缺 handoff 阻断下游、报告 decision trail、controller 不改源码等 gate。
+
+</details>
 
 <details open>
 <summary><b>v0.6.4 - 用数据验证的 worker 管控修复</b></summary>
@@ -616,6 +629,17 @@ Codex 可以调用这些工具：
 | `cc_last_run` | 查看最后一次运行 |
 | `cc_git_diff` | 查看子 Agent 修改后的 diff |
 | `cc_workflow_plan` | 生成多 Agent 工作流 |
+| `cc_workflow_validate` | 校验 YAML/JSON 工作流 DAG |
+| `cc_workflow_dry_run` | 预览拓扑批次 |
+| `cc_workflow_run` | 运行工作流；`mock=true` 不花模型额度 |
+| `cc_workflow_status` | 查看节点状态、gate 细节和决策 |
+| `cc_workflow_retry_node` | 让一个节点和下游节点失效，准备重试 |
+| `cc_workflow_stop` | 取消工作流 |
+| `cc_workflow_report` | 写出带 decision trail 的工作流报告 |
+| `cc_handoff_template` | 返回角色 handoff schema 和示例 |
+| `cc_handoff_validate` | 校验 run handoff |
+| `cc_handoff_read` | 读取 run handoff |
+| `cc_handoff_repair_prompt` | 生成缺字段修复 prompt |
 | `cc_write_claude_md` | 给项目写 Claude Code 子 agent 的 `CLAUDE.md` 人设文档 |
 | `cc_score_models` | 给本机模型打分 |
 | `cc_write_strategy_reports` | 写出模型评分和调度报告 |

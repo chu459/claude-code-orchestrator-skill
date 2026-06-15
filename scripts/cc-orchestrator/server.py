@@ -32,6 +32,10 @@ from cc_orchestrator import (
     diff_summary,
     export_report,
     folder_policy,
+    handoff_read,
+    handoff_repair_prompt,
+    handoff_template,
+    handoff_validate,
     healthcheck,
     init_workspace,
     git_diff,
@@ -55,6 +59,13 @@ from cc_orchestrator import (
     run_streaming_agent,
     run_visible_agent,
     run_workflow_plan,
+    workflow_dry_run,
+    workflow_retry_node,
+    workflow_run,
+    workflow_status,
+    workflow_stop,
+    workflow_validate,
+    workflow_write_report,
     repair_mcp_paths,
     secret_scan_run,
     send_instruction,
@@ -514,6 +525,52 @@ class WorkflowPlanInput(BaseModel):
 
     task: str = Field(..., min_length=1, max_length=20000, description="User task to plan for the configured Codex-controlled multi-agent workflow.")
     cwd: Optional[str] = Field(default=None, description="Working directory for the workflow.")
+
+
+class WorkflowFileInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    file: str = Field(..., description="Workflow YAML or JSON file path.")
+    task: Optional[str] = Field(default=None, max_length=20000)
+    cwd: Optional[str] = None
+
+
+class WorkflowRunInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    file: str = Field(..., description="Workflow YAML or JSON file path.")
+    task: str = Field(..., min_length=1, max_length=20000)
+    cwd: Optional[str] = None
+    mock: bool = Field(default=True, description="Run without spending model quota by creating mock node runs. Real DAG execution is intentionally disabled in v0.7.0.")
+    loop_guard: int = Field(default=50, ge=1, le=500)
+
+
+class WorkflowIdInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    workflow_id: str
+    cwd: Optional[str] = None
+
+
+class WorkflowRetryNodeInput(WorkflowIdInput):
+    node_id: str
+
+
+class WorkflowStopInput(WorkflowIdInput):
+    force: bool = False
+
+
+class HandoffTemplateInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    role: str = Field(default="testing", description=ROLE_DESCRIPTION)
+
+
+class HandoffRunInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    run_id: str
+    schema: Optional[str] = None
 
 
 class ReportInput(BaseModel):
@@ -1326,6 +1383,108 @@ async def cc_workflow_plan(params: WorkflowPlanInput) -> str:
     """
     try:
         return _json(run_workflow_plan(params.task, cwd=Path(params.cwd) if params.cwd else None))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_workflow_validate", annotations={"title": "Validate Workflow DAG", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
+async def cc_workflow_validate(params: WorkflowFileInput) -> str:
+    """Validate a YAML/JSON workflow DAG without launching workers."""
+    try:
+        workflow_cwd = Path(params.cwd) if params.cwd else Path.cwd()
+        return _json(workflow_validate(params.file, cwd=workflow_cwd))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_workflow_dry_run", annotations={"title": "Dry Run Workflow DAG", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
+async def cc_workflow_dry_run(params: WorkflowFileInput) -> str:
+    """Return topological batches, fan-in, and fan-out without launching workers."""
+    try:
+        workflow_cwd = Path(params.cwd) if params.cwd else Path.cwd()
+        return _json(workflow_dry_run(params.file, task=params.task, cwd=workflow_cwd))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_workflow_run", annotations={"title": "Run Workflow DAG", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True})
+async def cc_workflow_run(params: WorkflowRunInput) -> str:
+    """Run a workflow DAG. Use mock=true to validate controller behavior without model quota."""
+    try:
+        workflow_cwd = Path(params.cwd) if params.cwd else Path.cwd()
+        return _json(workflow_run(params.file, task=params.task, cwd=workflow_cwd, mock=params.mock, loop_guard=params.loop_guard))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_workflow_status", annotations={"title": "Workflow Status", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
+async def cc_workflow_status(params: WorkflowIdInput) -> str:
+    """Read workflow node states, run ids, gate details, and decisions."""
+    try:
+        return _json(workflow_status(params.workflow_id, cwd=Path(params.cwd) if params.cwd else None))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_workflow_retry_node", annotations={"title": "Retry Workflow Node", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False})
+async def cc_workflow_retry_node(params: WorkflowRetryNodeInput) -> str:
+    """Invalidate one workflow node and downstream nodes for a controller-managed retry."""
+    try:
+        return _json(workflow_retry_node(params.workflow_id, params.node_id, cwd=Path(params.cwd) if params.cwd else None))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_workflow_stop", annotations={"title": "Stop Workflow", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False})
+async def cc_workflow_stop(params: WorkflowStopInput) -> str:
+    """Cancel a workflow and stop active node runs if any."""
+    try:
+        return _json(workflow_stop(params.workflow_id, force=params.force, cwd=Path(params.cwd) if params.cwd else None))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_workflow_report", annotations={"title": "Workflow Report", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
+async def cc_workflow_report(params: WorkflowIdInput) -> str:
+    """Write a workflow report with node states, handoff validation, gates, cost, and decision trail."""
+    try:
+        return _json(workflow_write_report(params.workflow_id, cwd=Path(params.cwd) if params.cwd else None))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_handoff_template", annotations={"title": "Handoff Template", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
+async def cc_handoff_template(params: HandoffTemplateInput) -> str:
+    """Return a role-specific machine-verifiable handoff schema and example."""
+    try:
+        return _json(handoff_template(params.role))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_handoff_validate", annotations={"title": "Validate Handoff", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
+async def cc_handoff_validate(params: HandoffRunInput) -> str:
+    """Validate a run's handoff.json and write handoff.validation.json."""
+    try:
+        return _json(handoff_validate(params.run_id, schema_path=params.schema))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_handoff_read", annotations={"title": "Read Handoff", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
+async def cc_handoff_read(params: HandoffRunInput) -> str:
+    """Read a run's handoff.json if present."""
+    try:
+        return _json(handoff_read(params.run_id))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_handoff_repair_prompt", annotations={"title": "Handoff Repair Prompt", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
+async def cc_handoff_repair_prompt(params: HandoffRunInput) -> str:
+    """Generate a concise prompt asking a worker to repair missing handoff fields."""
+    try:
+        return _json(handoff_repair_prompt(params.run_id))
     except Exception as exc:
         return _error(exc)
 

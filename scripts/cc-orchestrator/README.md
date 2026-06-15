@@ -52,6 +52,8 @@ The server discovers CCSwitch from environment variables and the current user ho
 - `cc_last_run` returns the latest run metadata and tail output.
 - `cc_git_diff` returns a capped `git diff` for post-run review.
 - `cc_workflow_plan` returns the configured four-phase multi-agent role/model plan.
+- `cc_workflow_validate`, `cc_workflow_dry_run`, `cc_workflow_run`, `cc_workflow_status`, `cc_workflow_retry_node`, `cc_workflow_stop`, and `cc_workflow_report` provide the first workflow DAG controller layer.
+- `cc_handoff_template`, `cc_handoff_validate`, `cc_handoff_read`, and `cc_handoff_repair_prompt` provide machine-verifiable agent handoff contracts.
 - `cc_write_claude_md` writes a project `CLAUDE.md` persona/instructions file for Claude Code workers.
 - `cc_score_models` scores local CCSwitch models with local heuristics.
 - `cc_write_strategy_reports` writes model score and routing reports.
@@ -103,6 +105,13 @@ python tools\cc-orchestrator\cc_orchestrator.py folder-policy --cwd . --apply
 python tools\cc-orchestrator\cc_orchestrator.py write-claude-md --cwd . --role implementation
 python tools\cc-orchestrator\cc_orchestrator.py pick --role implementation --task-type complex_code
 python tools\cc-orchestrator\cc_orchestrator.py workflow-plan "Fix the bug"
+python tools\cc-orchestrator\cc_orchestrator.py workflow-validate --file examples\workflows\safe-refactor.yaml
+python tools\cc-orchestrator\cc_orchestrator.py workflow-dry-run --file examples\workflows\safe-refactor.yaml --task "Fix the bug"
+python tools\cc-orchestrator\cc_orchestrator.py workflow-run --file examples\workflows\safe-refactor.yaml --task "Fix the bug" --mock
+python tools\cc-orchestrator\cc_orchestrator.py workflow-status --workflow-id WF_ID
+python tools\cc-orchestrator\cc_orchestrator.py workflow-report --workflow-id WF_ID
+python tools\cc-orchestrator\cc_orchestrator.py handoff-template --role testing
+python tools\cc-orchestrator\cc_orchestrator.py handoff-validate --run-id RUN_ID
 python tools\cc-orchestrator\cc_orchestrator.py run-streaming "Review this project" --role review
 python tools\cc-orchestrator\cc_orchestrator.py run-status
 python tools\cc-orchestrator\cc_orchestrator.py poll-run --run-id RUN_ID

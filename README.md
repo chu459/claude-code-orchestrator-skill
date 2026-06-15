@@ -15,7 +15,7 @@
 <p align="center">
   <a href="README.zh-CN.md"><img alt="README: 中文" src="https://img.shields.io/badge/README-中文-red"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-brightgreen"></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-v0.6.4-black">
+  <img alt="Version" src="https://img.shields.io/badge/version-v0.7.0-black">
   <img alt="Codex Skill" src="https://img.shields.io/badge/Codex-Skill-0A0A0A">
   <img alt="MCP Included" src="https://img.shields.io/badge/MCP-Included-blue">
   <img alt="CCSwitch" src="https://img.shields.io/badge/CCSwitch-Model_Router-purple">
@@ -60,11 +60,12 @@ This is a miniature cost-management operating system for multi-agent coding.
 <h2 align="center">Latest Updates</h2>
 
 <p align="center">
-  <b>Current version: v0.6.4</b>
+  <b>Current version: v0.7.0</b>
 </p>
 
 | Version | What changed | Why it matters |
 | --- | --- | --- |
+| `v0.7.0` | Adds the first workflow DAG controller layer for GitHub issues #20, #21, and #22: YAML/JSON workflow validation, dry-run topological batches, mock workflow execution, structured handoff templates and validation, node gates, retry decisions, loop guard, workflow status, reports, and MCP tools. | Codex can now test long-running multi-agent pipelines as small verifiable nodes instead of one vague conversation. The first version is intentionally mock-safe, controller-owned, and data-backed before spending model quota. |
 | `v0.6.4` | Fixed GitHub issues #16, #17, and #18: final-only output now budgets persisted final text instead of raw stream noise, `--cwd` runs use the cwd-scoped artifact root with a run index for polling, and actual token aggregates are computed from raw `modelUsage` before redaction. | Codex now has measurable evidence for low-noise worker supervision: short final-only tasks no longer die from thinking/system stream noise, project artifacts stay inside the target workspace, and usage dashboards do not report fake zero-token runs. |
 | `v0.6.3` | Fixed the GitHub Actions docs deploy secret-scan false positive by splitting placeholder test tokens in selftest code. | The public docs pipeline can publish v0.6.x without mistaking safe placeholder examples for real credentials. |
 | `v0.6.2` | Fixed #15: Claude stream `modelUsage` is captured as `actual_model_usage`; metadata, dashboard, usage summary, and controller reports now distinguish declared route from actual billed model and flag `route_mismatch`. Added `supervise-decision` as a compatibility alias for `decision-review`. | Codex can now catch the painful case where a worker says it used one model but Claude actually bills another. The controller sees the real model, real usage, and mismatch risk. |
@@ -79,6 +80,18 @@ This is a miniature cost-management operating system for multi-agent coding.
 | `v0.1.0` | Built the first Skill + MCP + CLI foundation with CCSwitch profile discovery, model scoring, role routing, `CLAUDE.md` generation, visible Claude Code windows, logs, and safe defaults. | Proved the core idea: Codex is the brain, Claude Code is the worker layer, CCSwitch is the local model router. |
 
 <h3 align="center">Detailed Version Notes</h3>
+
+<details open>
+<summary><b>v0.7.0 - Workflow DAG, Handoff Contracts, and Node Gates</b></summary>
+
+- Implements #20: `workflow-validate`, `workflow-dry-run`, `workflow-run --mock`, `workflow-status`, `workflow-retry-node`, `workflow-stop`, and `workflow-report`. Real DAG worker execution is intentionally disabled in v0.7.0 until the controller loop has more production gates.
+- Implements #21: `handoff-template`, `handoff-validate`, `handoff-read`, and `handoff-repair-prompt`.
+- Implements #22: mock node controller decisions for `advance`, `retry`, `block`, `cancel`, gate checks, retry invalidation, and loop-guard blocking.
+- Adds MCP tools for the workflow and handoff commands.
+- Adds `examples/workflows/safe-refactor.yaml`.
+- Expands selftest with DAG validation, handoff validation, retry, max-retry blocking, missing-handoff blocking, report decision trails, and controller-only no-source-change gates.
+
+</details>
 
 <details open>
 <summary><b>v0.6.4 - Data-Proven Worker Supervision Fixes</b></summary>
@@ -537,6 +550,17 @@ python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" last-run
 | `cc_last_run` | Inspect last run |
 | `cc_git_diff` | Inspect git diff |
 | `cc_workflow_plan` | Build a multi-agent workflow plan |
+| `cc_workflow_validate` | Validate a YAML/JSON workflow DAG |
+| `cc_workflow_dry_run` | Preview topological workflow batches |
+| `cc_workflow_run` | Run a workflow; `mock=true` avoids model quota |
+| `cc_workflow_status` | Inspect node state, gate details, and decisions |
+| `cc_workflow_retry_node` | Invalidate one node and downstream nodes |
+| `cc_workflow_stop` | Cancel a workflow |
+| `cc_workflow_report` | Write a workflow report with decision trail |
+| `cc_handoff_template` | Return a role handoff schema and example |
+| `cc_handoff_validate` | Validate a run handoff |
+| `cc_handoff_read` | Read a run handoff |
+| `cc_handoff_repair_prompt` | Build a repair prompt for missing handoff fields |
 | `cc_write_claude_md` | Write a project `CLAUDE.md` for Claude Code worker behavior |
 | `cc_score_models` | Score local models |
 | `cc_write_strategy_reports` | Write score and routing reports |

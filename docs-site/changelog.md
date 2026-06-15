@@ -2,6 +2,15 @@
 
 This page tracks the public docs-facing history of Claude Code Orchestrator Skill.
 
+## v0.7.0 - Workflow DAG, handoff contracts, and node gates
+
+- Added the first workflow DAG controller layer for GitHub issues #20, #21, and #22.
+- Added `workflow-validate`, `workflow-dry-run`, `workflow-run --mock`, `workflow-status`, `workflow-retry-node`, `workflow-stop`, and `workflow-report`. Real DAG worker execution is intentionally disabled in v0.7.0.
+- Added `handoff-template`, `handoff-validate`, `handoff-read`, and `handoff-repair-prompt`.
+- Added MCP tools for workflow and handoff control.
+- Added mock controller gates for retry decisions, max-retry blocking, missing handoff blocking, loop guard, and decision-trail reports.
+- Added `examples/workflows/safe-refactor.yaml`.
+
 ## v0.6.4 - Data-proven worker supervision fixes
 
 - Fixed GitHub issues #16, #17, and #18.
