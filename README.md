@@ -15,7 +15,7 @@
 <p align="center">
   <a href="README.zh-CN.md"><img alt="README: 中文" src="https://img.shields.io/badge/README-中文-red"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-brightgreen"></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-v0.7.0-black">
+  <img alt="Version" src="https://img.shields.io/badge/version-v0.7.1-black">
   <img alt="Codex Skill" src="https://img.shields.io/badge/Codex-Skill-0A0A0A">
   <img alt="MCP Included" src="https://img.shields.io/badge/MCP-Included-blue">
   <img alt="CCSwitch" src="https://img.shields.io/badge/CCSwitch-Model_Router-purple">
@@ -60,11 +60,12 @@ This is a miniature cost-management operating system for multi-agent coding.
 <h2 align="center">Latest Updates</h2>
 
 <p align="center">
-  <b>Current version: v0.7.0</b>
+  <b>Current version: v0.7.1</b>
 </p>
 
 | Version | What changed | Why it matters |
 | --- | --- | --- |
+| `v0.7.1` | Fixes #24: manual `workflow-retry-node` now changes the workflow status from `succeeded` to `needs_rerun`, records invalidated nodes, and marks old node handoff/gate/token evidence as stale. | Codex and dashboards no longer accept a workflow that was manually invalidated. Pending nodes must run again before the workflow can be treated as done. |
 | `v0.7.0` | Adds the first workflow DAG controller layer for GitHub issues #20, #21, and #22: YAML/JSON workflow validation, dry-run topological batches, mock workflow execution, structured handoff templates and validation, node gates, retry decisions, loop guard, workflow status, reports, and MCP tools. | Codex can now test long-running multi-agent pipelines as small verifiable nodes instead of one vague conversation. The first version is intentionally mock-safe, controller-owned, and data-backed before spending model quota. |
 | `v0.6.4` | Fixed GitHub issues #16, #17, and #18: final-only output now budgets persisted final text instead of raw stream noise, `--cwd` runs use the cwd-scoped artifact root with a run index for polling, and actual token aggregates are computed from raw `modelUsage` before redaction. | Codex now has measurable evidence for low-noise worker supervision: short final-only tasks no longer die from thinking/system stream noise, project artifacts stay inside the target workspace, and usage dashboards do not report fake zero-token runs. |
 | `v0.6.3` | Fixed the GitHub Actions docs deploy secret-scan false positive by splitting placeholder test tokens in selftest code. | The public docs pipeline can publish v0.6.x without mistaking safe placeholder examples for real credentials. |
@@ -80,6 +81,17 @@ This is a miniature cost-management operating system for multi-agent coding.
 | `v0.1.0` | Built the first Skill + MCP + CLI foundation with CCSwitch profile discovery, model scoring, role routing, `CLAUDE.md` generation, visible Claude Code windows, logs, and safe defaults. | Proved the core idea: Codex is the brain, Claude Code is the worker layer, CCSwitch is the local model router. |
 
 <h3 align="center">Detailed Version Notes</h3>
+
+<details open>
+<summary><b>v0.7.1 - Manual Retry Invalidates Workflow Success</b></summary>
+
+- Fixed #24: `workflow-retry-node` no longer leaves the workflow-level status as `succeeded` after invalidating nodes.
+- Manual retry now sets workflow status to `needs_rerun`, records `requires_rerun=true`, and stores the invalidated node list.
+- Invalidated nodes no longer expose old `handoff`, `handoff_validation`, `gate`, run id, token, or cost fields as current acceptance evidence.
+- Workflow reports now show a visible manual-invalidation warning and stale evidence markers.
+- Expanded `selftest` with manual retry status, stale evidence, and report warning checks.
+
+</details>
 
 <details open>
 <summary><b>v0.7.0 - Workflow DAG, Handoff Contracts, and Node Gates</b></summary>

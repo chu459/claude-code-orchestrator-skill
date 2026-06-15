@@ -24,7 +24,7 @@
   <a href="README.md"><img alt="Language: English" src="https://img.shields.io/badge/README-English-black"></a>
   <a href="README.md"><img alt="Default README: English" src="https://img.shields.io/badge/Default-English-blue"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-brightgreen"></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-v0.7.0-black">
+  <img alt="Version" src="https://img.shields.io/badge/version-v0.7.1-black">
   <img alt="Codex Skill" src="https://img.shields.io/badge/Codex-Skill-0A0A0A">
   <img alt="MCP Included" src="https://img.shields.io/badge/MCP-Included-blue">
   <img alt="CCSwitch" src="https://img.shields.io/badge/CCSwitch-Model_Router-purple">
@@ -80,11 +80,12 @@ Skill = Codex 的操作说明书
 <h2 align="center">更新日志</h2>
 
 <p align="center">
-  <b>当前版本：v0.7.0</b>
+  <b>当前版本：v0.7.1</b>
 </p>
 
 | 版本 | 更新内容 | 为什么重要 |
 | --- | --- | --- |
+| `v0.7.1` | 修复 #24：手动执行 `workflow-retry-node` 后，workflow 顶层状态会从 `succeeded` 改成 `needs_rerun`，记录被 invalidated 的节点，并把旧 handoff/gate/token 证据标成 stale。 | Codex 和 dashboard 不会再把“已经被手动打回重跑”的 workflow 当成成功验收。pending 节点必须重新跑完，才能再次视为完成。 |
 | `v0.7.0` | 新增 GitHub issues #20、#21、#22 的第一版工作流 DAG 控制层：YAML/JSON 工作流校验、dry-run 拓扑批次、mock 工作流运行、结构化 handoff 模板与校验、节点 gate、重试决策、loop guard、workflow status/report 和 MCP 工具。 | Codex 现在可以把长任务拆成一组可验证的小节点，而不是塞进一段越来越含糊的长对话。第一版先用 mock 安全闭环，不花模型额度，也能拿数据证明控制器逻辑靠谱。 |
 | `v0.6.4` | 修复 GitHub issues #16、#17、#18：`final-only` 先过滤 raw stream 噪声再计算持久 stdout 预算；`--cwd` run 使用目标 cwd 自己的 artifact root，并用 run index 保证后续 poll；真实 token 聚合从 raw `modelUsage` 先计算，再做脱敏。 | Codex 现在有可验证的数据证据：短任务不会被 thinking/system 噪声提前打死，多个项目的 agent 产物不会串目录，usage/dashboard 也不会再显示假的 0 token。 |
 | `v0.6.3` | 修复 GitHub Actions 文档部署里的密钥扫描误报：selftest 里的占位 token 样例改成拆分字符串。 | 文档站可以正常发布 v0.6.x，不会把安全的占位示例误判成真实密钥。 |
@@ -100,6 +101,17 @@ Skill = Codex 的操作说明书
 | `v0.1.0` | 完成 Skill + MCP + CLI 基座：CCSwitch 发现、模型评分、角色路由、`CLAUDE.md` 生成、可视 Claude Code 窗口、日志和安全默认值。 | 证明核心思路：Codex 当大脑，Claude Code 当执行层，CCSwitch 当本地模型路由器。 |
 
 <h3 align="center">详细版本说明</h3>
+
+<details open>
+<summary><b>v0.7.1 - 手动 retry 会取消 workflow 成功状态</b></summary>
+
+- 修复 #24：`workflow-retry-node` 不会再让已 invalidated 的 workflow 顶层状态继续保持 `succeeded`。
+- 手动 retry 后会写入 `needs_rerun`、`requires_rerun=true` 和 invalidated 节点列表。
+- 被 invalidated 的节点不再把旧 `handoff`、`handoff_validation`、`gate`、run id、token、cost 当成当前验收证据暴露。
+- workflow report 会显示手动 invalidation 警告和 stale evidence 标记。
+- selftest 新增手动 retry 状态、旧证据清理、报告警告三组检查。
+
+</details>
 
 <details open>
 <summary><b>v0.7.0 - 工作流 DAG、handoff 合约、节点 gate</b></summary>

@@ -6351,6 +6351,40 @@ def evaluate_workflow_gate(node_id: str, node: dict[str, Any], status: dict[str,
     return {"ok": ok, "node_id": node_id, "checks": results}
 
 
+STALE_WORKFLOW_EVIDENCE_KEYS = (
+    "run_id",
+    "handoff",
+    "handoff_validation",
+    "handoff_status",
+    "actual_total_tokens",
+    "actual_cost_usd",
+    "gate",
+)
+
+
+def invalidate_workflow_node_evidence(node_state: dict[str, Any], *, reason: str) -> None:
+    stale: dict[str, Any] = {
+        "reason": reason,
+        "invalidated_at": utc_now_iso(),
+    }
+    if node_state.get("run_id"):
+        stale["run_id"] = node_state.get("run_id")
+    if isinstance(node_state.get("handoff"), dict):
+        stale["handoff_status"] = node_state["handoff"].get("status")
+    if isinstance(node_state.get("handoff_validation"), dict):
+        stale["handoff_validation_ok"] = node_state["handoff_validation"].get("ok")
+    if isinstance(node_state.get("gate"), dict):
+        stale["gate_ok"] = node_state["gate"].get("ok")
+    if node_state.get("actual_total_tokens") is not None:
+        stale["actual_total_tokens"] = node_state.get("actual_total_tokens")
+    if node_state.get("actual_cost_usd") is not None:
+        stale["actual_cost_usd"] = node_state.get("actual_cost_usd")
+    for key in STALE_WORKFLOW_EVIDENCE_KEYS:
+        node_state.pop(key, None)
+    node_state["state"] = "pending"
+    node_state["stale_evidence"] = stale
+
+
 def workflow_write_report(workflow_id: str, cwd: Path | None = None) -> dict[str, Any]:
     workflow_dir = safe_workflow_dir(workflow_id, cwd=cwd)
     status = read_json_file(workflow_dir / "status.json", {})
@@ -6365,9 +6399,17 @@ def workflow_write_report(workflow_id: str, cwd: Path | None = None) -> dict[str
         f"- Workflow id: `{workflow_id}`",
         f"- Status: `{status.get('status')}`",
         f"- Task: `{status.get('task')}`",
-        "",
-        "## Nodes",
     ]
+    if status.get("status") == "needs_rerun" or status.get("requires_rerun"):
+        lines.extend(
+            [
+                f"- Requires rerun: `{bool(status.get('requires_rerun'))}`",
+                f"- Invalidated nodes: `{', '.join(status.get('invalidated_nodes') or [])}`",
+                "",
+                "> This workflow has been manually invalidated. Pending nodes must run again before Codex accepts it.",
+            ]
+        )
+    lines.extend(["", "## Nodes"])
     for node_id, node in (status.get("nodes") or {}).items():
         lines.extend(
             [
@@ -6377,6 +6419,8 @@ def workflow_write_report(workflow_id: str, cwd: Path | None = None) -> dict[str
         )
         if node.get("gate"):
             lines.append(f"  - gate: `{json.dumps(node['gate'], ensure_ascii=False)}`")
+        if node.get("stale_evidence"):
+            lines.append(f"  - stale evidence: `{json.dumps(node['stale_evidence'], ensure_ascii=False)}`")
     lines.extend(["", "## Decision Trail"])
     for decision in status.get("decisions") or []:
         lines.append(f"- `{decision.get('ts')}` `{decision.get('node_id')}` -> `{decision.get('decision')}`: {decision.get('reason')}")
@@ -6466,6 +6510,7 @@ def workflow_run(file: str | Path, task: str, cwd: Path | None = None, mock: boo
             if node_type == "gate":
                 node_state["state"] = "validating"
                 gate = evaluate_workflow_gate(node_id, node, status)
+                node_state.pop("stale_evidence", None)
                 node_state["gate"] = gate
                 if gate.get("ok"):
                     node_state["state"] = "done"
@@ -6480,8 +6525,7 @@ def workflow_run(file: str | Path, task: str, cwd: Path | None = None, mock: boo
                     node_state["retry_count"] = int(node_state.get("retry_count") or 0) + 1
                     invalidated = {retry_target, *workflow_descendants(nodes, retry_target)}
                     for item in invalidated:
-                        status["nodes"][item]["state"] = "pending"
-                        status["nodes"][item].pop("run_id", None)
+                        invalidate_workflow_node_evidence(status["nodes"][item], reason="gate retry")
                     decision = {"ts": utc_now_iso(), "node_id": node_id, "decision": "retry", "reason": "gate failed", "next_nodes": [retry_target], "retry_count": node_state["retry_count"], "requires_codex_takeover": False}
                     status["decisions"].append(decision)
                     progress = True
@@ -6510,6 +6554,7 @@ def workflow_run(file: str | Path, task: str, cwd: Path | None = None, mock: boo
             attempt = int(node_state.get("attempts") or 0)
             node_state["state"] = "running"
             result = create_mock_workflow_run_node(paths, workflow_dir, workflow_id, node_id, node, attempt)
+            node_state.pop("stale_evidence", None)
             node_state["attempts"] = attempt + 1
             node_state["run_id"] = result["run_id"]
             node_state["handoff"] = result["handoff"]
@@ -6562,9 +6607,23 @@ def workflow_retry_node(workflow_id: str, node_id: str, cwd: Path | None = None)
     invalidated = {node_id, *workflow_descendants(nodes, node_id)}
     for item in invalidated:
         if item in status.get("nodes", {}):
-            status["nodes"][item]["state"] = "pending"
-            status["nodes"][item].pop("run_id", None)
-    status.setdefault("decisions", []).append({"ts": utc_now_iso(), "node_id": node_id, "decision": "retry", "reason": "manual retry requested", "next_nodes": [node_id]})
+            invalidate_workflow_node_evidence(status["nodes"][item], reason="manual retry requested")
+    status["status"] = "needs_rerun"
+    status["block_reason"] = None
+    status["requires_rerun"] = True
+    status["invalidated_nodes"] = sorted(invalidated)
+    status["invalidated_at"] = utc_now_iso()
+    status.setdefault("decisions", []).append(
+        {
+            "ts": utc_now_iso(),
+            "node_id": node_id,
+            "decision": "retry",
+            "reason": "manual retry requested",
+            "next_nodes": [node_id],
+            "invalidated": sorted(invalidated),
+            "requires_codex_takeover": True,
+        }
+    )
     write_workflow_status(workflow_dir, status)
     return {"ok": True, "workflow_id": workflow_id, "node_id": node_id, "invalidated": sorted(invalidated), "status_path": str(workflow_dir / "status.json")}
 
@@ -6943,6 +7002,13 @@ nodes:
             real_workflow_run_rejected = False
         except OrchestratorError:
             real_workflow_run_rejected = True
+        manual_retry_workflow = workflow_run(workflow_path, task="mock manual retry", cwd=Path(tmp), mock=True)
+        manual_retry_id = str(manual_retry_workflow.get("workflow_id"))
+        manual_retry_result = workflow_retry_node(manual_retry_id, "implementation", cwd=Path(tmp))
+        manual_retry_status = read_workflow_status(manual_retry_id, cwd=Path(tmp))
+        manual_retry_nodes = manual_retry_status.get("nodes") or {}
+        manual_retry_report_result = workflow_write_report(manual_retry_id, cwd=Path(tmp))
+        manual_retry_report_text = Path(str(manual_retry_report_result.get("report_path"))).read_text(encoding="utf-8")
         source_after = source_file.read_text(encoding="utf-8")
 
         cycle_spec = json.loads(json.dumps(valid_workflow))
@@ -7025,6 +7091,17 @@ nodes:
         "workflow_mock_run_succeeds": workflow_mock.get("ok") and workflow_mock.get("status", {}).get("status") == "succeeded",
         "workflow_tampered_index_rejected": tampered_workflow_index_rejected,
         "workflow_real_run_requires_mock": real_workflow_run_rejected,
+        "manual_retry_marks_needs_rerun": manual_retry_result.get("ok")
+        and manual_retry_status.get("status") == "needs_rerun"
+        and manual_retry_status.get("requires_rerun") is True
+        and "implementation" in (manual_retry_status.get("invalidated_nodes") or []),
+        "manual_retry_clears_stale_acceptance_evidence": manual_retry_nodes.get("implementation", {}).get("state") == "pending"
+        and "run_id" not in manual_retry_nodes.get("implementation", {})
+        and "handoff_validation" not in manual_retry_nodes.get("implementation", {})
+        and manual_retry_nodes.get("implementation", {}).get("stale_evidence", {}).get("handoff_status") == "pass"
+        and "gate" not in manual_retry_nodes.get("quality_gate", {})
+        and manual_retry_nodes.get("quality_gate", {}).get("stale_evidence", {}).get("gate_ok") is True,
+        "manual_retry_report_warns_needs_rerun": "manually invalidated" in manual_retry_report_text and "stale evidence" in manual_retry_report_text,
         "mock_5_node_fanout_join_ok": (workflow_mock_status.get("nodes") or {}).get("quality_gate", {}).get("state") == "done" and (workflow_mock_status.get("nodes") or {}).get("testing", {}).get("attempts") == 2,
         "retry_once_then_pass": any(decision.get("decision") == "retry" and decision.get("retry_count") == 1 for decision in workflow_mock_status.get("decisions") or []) and workflow_mock_status.get("status") == "succeeded",
         "max_retries_blocks": max_retry_status.get("status") == "blocked"

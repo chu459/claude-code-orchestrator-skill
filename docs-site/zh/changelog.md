@@ -2,6 +2,14 @@
 
 这里记录 Claude Code Orchestrator Skill 的主要版本变化。
 
+## v0.7.1 - 手动 retry 会取消 workflow 成功状态
+
+- 修复 GitHub issue #24。
+- `workflow-retry-node` 会把被手动 invalidated 的 workflow 从 `succeeded` 改成 `needs_rerun`。
+- 被 invalidated 的节点会清掉当前 handoff、校验、gate、run id、token、cost 证据，只保留紧凑的 `stale_evidence` 标记。
+- workflow report 会显示手动 invalidation 警告，避免 Codex 或 dashboard 接受过期成功状态。
+- selftest 新增手动 retry 状态、stale evidence、报告警告三组检查。
+
 ## v0.7.0 - 工作流 DAG、handoff 合约、节点 gate
 
 - 新增 GitHub issues #20、#21、#22 的第一版工作流 DAG 控制层。

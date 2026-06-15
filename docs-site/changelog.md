@@ -2,6 +2,14 @@
 
 This page tracks the public docs-facing history of Claude Code Orchestrator Skill.
 
+## v0.7.1 - Manual retry invalidates workflow success
+
+- Fixed GitHub issue #24.
+- `workflow-retry-node` now changes a manually invalidated workflow from `succeeded` to `needs_rerun`.
+- Invalidated nodes now clear current handoff, validation, gate, run id, token, and cost evidence, while keeping a compact `stale_evidence` marker.
+- Workflow reports now show a visible manual-invalidation warning so Codex and dashboards cannot accept stale success.
+- Selftest now covers manual retry status, stale evidence, and report warning behavior.
+
 ## v0.7.0 - Workflow DAG, handoff contracts, and node gates
 
 - Added the first workflow DAG controller layer for GitHub issues #20, #21, and #22.
