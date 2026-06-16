@@ -24,7 +24,7 @@
   <a href="README.md"><img alt="Language: English" src="https://img.shields.io/badge/README-English-black"></a>
   <a href="README.md"><img alt="Default README: English" src="https://img.shields.io/badge/Default-English-blue"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-brightgreen"></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-v0.8.0-black">
+  <img alt="Version" src="https://img.shields.io/badge/version-v0.8.1-black">
   <img alt="Codex Skill" src="https://img.shields.io/badge/Codex-Skill-0A0A0A">
   <img alt="MCP Included" src="https://img.shields.io/badge/MCP-Included-blue">
   <img alt="CCSwitch" src="https://img.shields.io/badge/CCSwitch-Model_Router-purple">
@@ -80,11 +80,12 @@ Skill = Codex 的操作说明书
 <h2 align="center">更新日志</h2>
 
 <p align="center">
-  <b>当前版本：v0.8.0</b>
+  <b>当前版本：v0.8.1</b>
 </p>
 
 | 版本 | 更新内容 | 为什么重要 |
 | --- | --- | --- |
+| `v0.8.1` | 修复 Windows 中文用户名/中文路径下 fake Claude launcher 压测失败的问题；fake worker 现在会保留目标项目 cwd；`skill-route` 会更强地压低 `.backup...` 旧 Skill 的优先级；selftest 新增这两类回归检查。 | 中文路径机器也能稳定做并发压测；Skill Capsule 路由不容易误选旧备份 Skill，给 ClaudeCode 的说明更准。 |
 | `v0.8.0` | 实现 #26：新增本机 Skill 发现、`skill-index`、`skill-manual`、稳定 `skill-route`、轻量 `skill-capsule`，并给 `run`、`run-streaming`、`spawn-role-team`、mock `workflow-run` 增加 `--skills auto`。同时补齐 MCP 工具和 metadata 证据：选中了哪些 Skill、hash、原因、模式、上下文字节数、capsule 引用。扫描器现在使用 root alias，进目录前跳过大目录/link 目录，并避免公开输出本机绝对路径。 | Codex 现在可以给每个 Claude Code worker 只发最小够用的 Skill Capsule，不用把所有本机 Skill 都塞进去，也不会让 worker 误以为自己能直接调用 Codex-only 工具。本机路径也不会被带进公开输出。 |
 | `v0.7.1` | 修复 #24：手动执行 `workflow-retry-node` 后，workflow 顶层状态会从 `succeeded` 改成 `needs_rerun`，记录被 invalidated 的节点，并把旧 handoff/gate/token 证据标成 stale。 | Codex 和 dashboard 不会再把“已经被手动打回重跑”的 workflow 当成成功验收。pending 节点必须重新跑完，才能再次视为完成。 |
 | `v0.7.0` | 新增 GitHub issues #20、#21、#22 的第一版工作流 DAG 控制层：YAML/JSON 工作流校验、dry-run 拓扑批次、mock 工作流运行、结构化 handoff 模板与校验、节点 gate、重试决策、loop guard、workflow status/report 和 MCP 工具。 | Codex 现在可以把长任务拆成一组可验证的小节点，而不是塞进一段越来越含糊的长对话。第一版先用 mock 安全闭环，不花模型额度，也能拿数据证明控制器逻辑靠谱。 |
@@ -102,6 +103,16 @@ Skill = Codex 的操作说明书
 | `v0.1.0` | 完成 Skill + MCP + CLI 基座：CCSwitch 发现、模型评分、角色路由、`CLAUDE.md` 生成、可视 Claude Code 窗口、日志和安全默认值。 | 证明核心思路：Codex 当大脑，Claude Code 当执行层，CCSwitch 当本地模型路由器。 |
 
 <h3 align="center">详细版本说明</h3>
+
+<details open>
+<summary><b>v0.8.1 - 压测兼容性补丁</b></summary>
+
+- 修复 Windows `.cmd` fake Claude launcher 在中文临时目录、中文用户名路径下被 cmd.exe 读坏的问题。
+- fake worker 现在会保留调用方传入的项目 cwd，不会切到 launcher 所在目录。
+- 加强 `skill-route` 对 `.backup...` Skill 的降权，避免旧备份 Skill 排到 active Skill 前面。
+- selftest 新增中文路径 fake launcher 和 active-over-backup Skill routing 两组回归检查。
+
+</details>
 
 <details open>
 <summary><b>v0.8.0 - Skill 手册与 Skill Capsule 路由</b></summary>

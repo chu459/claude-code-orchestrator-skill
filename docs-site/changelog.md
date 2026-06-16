@@ -2,6 +2,13 @@
 
 This page tracks the public docs-facing history of Claude Code Orchestrator Skill.
 
+## v0.8.1 - Pressure-test compatibility patch
+
+- Fixed the Windows `.cmd` fake Claude launcher used by mock pressure tests when the temp path contains Chinese characters.
+- Fake workers now keep the requested project cwd instead of changing into the launcher directory.
+- Strengthened `skill-route` so stale `.backup...` Skill copies do not outrank the active Skill.
+- Added selftest regression checks for Chinese-path fake launchers and active-over-backup Skill routing.
+
 ## v0.8.0 - Skill manual and Skill Capsule routing
 
 - Implements GitHub issue #26.

@@ -2,6 +2,13 @@
 
 这里记录 Claude Code Orchestrator Skill 的主要版本变化。
 
+## v0.8.1 - 压测兼容性补丁
+
+- 修复 Windows `.cmd` fake Claude launcher 在中文临时目录、中文用户名路径下被 cmd.exe 读坏的问题。
+- fake worker 现在会保留调用方传入的项目 cwd，不会切到 launcher 所在目录。
+- 加强 `skill-route` 对 `.backup...` Skill 的降权，避免旧备份 Skill 排到 active Skill 前面。
+- selftest 新增中文路径 fake launcher 和 active-over-backup Skill routing 两组回归检查。
+
 ## v0.8.0 - Skill 手册与 Skill Capsule 路由
 
 - 实现 GitHub issue #26。

@@ -1410,7 +1410,7 @@ def route_score_skill(skill: dict[str, Any], task: str, role: str) -> tuple[int,
     elif skill.get("risk") == "medium":
         score -= 2
     if "backup" in str(skill.get("relative_path") or "").lower():
-        score -= 6
+        score -= 24
         reasons.append("backup copy ranked lower than active Skill")
     return score, reasons or ["fallback ranking"]
 
@@ -6417,7 +6417,18 @@ def write_fake_claude_launcher(directory: Path) -> Path:
     )
     if os.name == "nt":
         launcher = directory / "fake-claude.cmd"
-        launcher.write_text(f"@echo off\r\n\"{sys.executable}\" \"{script}\"\r\n", encoding="utf-8")
+        launcher.write_text(
+            "\r\n".join(
+                [
+                    "@echo off",
+                    "setlocal",
+                    f'"{sys.executable}" "%~dp0fake_claude.py"',
+                    "exit /b %ERRORLEVEL%",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
     else:
         launcher = directory / "fake-claude"
         launcher.write_text(f"#!/usr/bin/env sh\nexec \"{sys.executable}\" \"{script}\"\n", encoding="utf-8")
@@ -7827,11 +7838,13 @@ def selftest() -> dict[str, Any]:
         clean_after_init = clean_workspace(cwd=tmp, dry_run=True)
         fake_skill_root = Path(tmp) / "fake-skills"
         windows_skill_dir = fake_skill_root / "windows-encoding"
+        backup_windows_skill_dir = fake_skill_root / "windows-encoding.backup.20260616"
         codex_skill_dir = fake_skill_root / "codex-browser"
         blocked_skill_dir = fake_skill_root / "douyin-reply"
         no_frontmatter_dir = fake_skill_root / "plain-skill"
         skipped_node_modules_skill_dir = fake_skill_root / "node_modules" / "nested-skill"
         (windows_skill_dir / "scripts").mkdir(parents=True)
+        backup_windows_skill_dir.mkdir(parents=True)
         codex_skill_dir.mkdir(parents=True)
         blocked_skill_dir.mkdir(parents=True)
         no_frontmatter_dir.mkdir(parents=True)
@@ -7855,6 +7868,19 @@ def selftest() -> dict[str, Any]:
             encoding="utf-8",
         )
         (windows_skill_dir / "scripts" / "check.py").write_text("print('ok')\n", encoding="utf-8")
+        (backup_windows_skill_dir / "SKILL.md").write_text(
+            "\n".join(
+                [
+                    "---",
+                    "name: windows-chinese-encoding",
+                    "description: Backup copy with extra compatibility keywords that should not outrank the active Skill.",
+                    "---",
+                    "",
+                    "# Windows Encoding Backup",
+                ]
+            ),
+            encoding="utf-8",
+        )
         linked_scripts_tested = False
         linked_scripts_target = Path(tmp) / "linked-scripts-target"
         linked_scripts_target.mkdir()
@@ -7970,6 +7996,23 @@ def selftest() -> dict[str, Any]:
         chinese_root.mkdir()
         json_path = write_json_file(chinese_root / "metadata.json", {"prompt": "中文✅\x01", "path": str(chinese_root)})
         json_roundtrip = json.loads(json_path.read_text(encoding="utf-8"))
+        launcher_root = Path(tmp) / "涓枃 fake launcher"
+        launcher_root.mkdir()
+        fake_launcher = write_fake_claude_launcher(launcher_root)
+        fake_launcher_env = force_utf8_env(dict(os.environ))
+        fake_launcher_env["CC_ORCHESTRATOR_FAKE_STEPS"] = "1"
+        fake_launcher_env["CC_ORCHESTRATOR_FAKE_DELAY"] = "0"
+        fake_launcher_proc = subprocess.run(
+            [str(fake_launcher), "-p", "--output-format", "stream-json", "prompt"],
+            cwd=str(chinese_root),
+            env=fake_launcher_env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+        )
+        fake_launcher_first = json.loads(fake_launcher_proc.stdout.splitlines()[0]) if fake_launcher_proc.stdout.splitlines() else {}
         change_split = classify_change_paths(
             chinese_root,
             [
@@ -8136,6 +8179,7 @@ nodes:
     codex_skill_record = next((item for item in skill_index_first.get("skills", []) if item.get("name") == "codex-browser-github"), {})
     blocked_skill_record = next((item for item in skill_index_first.get("skills", []) if item.get("name") == "douyin-reply-danger"), {})
     route_names = [str(item.get("name")) for item in skill_route_result.get("selected", [])]
+    route_windows_record = next((item for item in skill_route_result.get("selected", []) if item.get("name") == "windows-chinese-encoding"), {})
     workflow_skill_routing = workflow_mock_with_skills_status.get("skill_routing") or {}
     checks = {
         "utf8_env": env.get("PYTHONIOENCODING") == "utf-8" and env.get("PYTHONUTF8") == "1",
@@ -8154,6 +8198,7 @@ nodes:
         "actual_model_usage_detects_mismatch": actual_route.get("actual_model") == "glm-5.2" and actual_route.get("actual_total_tokens") == 125 and actual_route.get("route_mismatch"),
         "actual_model_usage_allowlist": "apiKey" not in actual_route.get("actual_model_usage", {}).get("glm-5.2", {}),
         "utf8_json_roundtrip": json_roundtrip.get("prompt") == "中文✅�" and "中文项目" in str(json_roundtrip.get("path")),
+        "fake_launcher_handles_chinese_path": fake_launcher_proc.returncode == 0 and Path(str(fake_launcher_first.get("cwd") or "")).resolve() == chinese_root.resolve(),
         "change_split_source_vs_artifact": change_split["project_source_changes"]["changed_count"] == 1 and change_split["agent_artifact_changes"]["changed_count"] == 1,
         "run_id_validation": run_id_rejected,
         "worker_env_allowlist": "ANTHROPIC_API_KEY" in worker_env and "GITHUB_TOKEN" not in worker_env and "NPM_TOKEN" not in worker_env,
@@ -8164,9 +8209,9 @@ nodes:
         "clean_workspace_preserves_scaffold": clean_after_init.get("action_count") == 0,
         "init_workspace_generates_skill_map": init_skill_status.get("index_exists") and init_skill_status.get("manual_exists"),
         "init_workspace_can_disable_skill_scan": init_no_scan_result.get("ok") and not init_no_scan_status.get("index_exists") and not init_no_scan_status.get("manual_exists"),
-        "skill_index_finds_fake_skills": skill_index_first.get("skill_count") == 4 and skill_index_first.get("scan", {}).get("indexed") == 4,
-        "skill_index_refresh_unchanged": skill_index_second.get("scan", {}).get("changed") == 0 and skill_index_second.get("scan", {}).get("unchanged") == 4,
-        "skill_index_refresh_reuses_unchanged": skill_index_second.get("scan", {}).get("reused") == 4 and skill_index_second.get("scan", {}).get("rebuilt") == 0,
+        "skill_index_finds_fake_skills": skill_index_first.get("skill_count") == 5 and skill_index_first.get("scan", {}).get("indexed") == 5,
+        "skill_index_refresh_unchanged": skill_index_second.get("scan", {}).get("changed") == 0 and skill_index_second.get("scan", {}).get("unchanged") == 5,
+        "skill_index_refresh_reuses_unchanged": skill_index_second.get("scan", {}).get("reused") == 5 and skill_index_second.get("scan", {}).get("rebuilt") == 0,
         "skill_index_does_not_store_body_secret": fake_secret_value not in skill_index_text,
         "skill_index_does_not_store_frontmatter_secret": fake_frontmatter_secret not in skill_index_text,
         "skill_index_redacts_frontmatter_path_text": fake_frontmatter_path not in skill_index_text,
@@ -8182,6 +8227,7 @@ nodes:
         "skill_route_redacts_frontmatter_path": fake_frontmatter_path not in skill_route_text,
         "skill_manual_written": skill_manual_result.get("written") and int(skill_manual_result.get("bytes") or 0) > 0,
         "skill_route_selects_compatibility_skill": "windows-chinese-encoding" in route_names,
+        "skill_route_prefers_active_over_backup": "backup" not in str(route_windows_record.get("relative_path") or "").lower(),
         "skill_capsule_is_compact": 0 < int(skill_capsule_result.get("skill_context_bytes") or 0) <= SKILL_CAPSULE_MAX_BYTES,
         "skill_capsule_omits_absolute_root": str(fake_skill_root) not in skill_capsule_text_value,
         "skill_capsule_redacts_frontmatter_secret": fake_frontmatter_secret not in skill_auto_context_text_value,
@@ -8191,7 +8237,7 @@ nodes:
         "skill_junction_root_blocked": junction_root_blocked,
         "skill_symlink_detection_source_present": "is_symlink" in Path(__file__).read_text(encoding="utf-8", errors="replace"),
         "skill_route_mcp_not_marked_readonly": 'name="cc_skill_route"' in server_text and '"readOnlyHint": False' in server_text,
-        "skill_status_reports_index": skill_status_result.get("index_exists") and skill_status_result.get("skill_count") == 4,
+        "skill_status_reports_index": skill_status_result.get("index_exists") and skill_status_result.get("skill_count") == 5,
         "skill_auto_context_metadata": bool(skill_context_text) and skill_run_metadata.get("enabled") and skill_run_metadata.get("selected_count", 0) >= 1,
         "workflow_validate_accepts_valid_dag": workflow_valid.get("ok") and workflow_valid.get("node_count") == 6 and workflow_valid.get("edge_count", 0) >= 5,
         "workflow_validate_rejects_outside_cwd": workflow_cwd_scope_rejected,

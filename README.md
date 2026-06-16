@@ -15,7 +15,7 @@
 <p align="center">
   <a href="README.zh-CN.md"><img alt="README: 中文" src="https://img.shields.io/badge/README-中文-red"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-brightgreen"></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-v0.8.0-black">
+  <img alt="Version" src="https://img.shields.io/badge/version-v0.8.1-black">
   <img alt="Codex Skill" src="https://img.shields.io/badge/Codex-Skill-0A0A0A">
   <img alt="MCP Included" src="https://img.shields.io/badge/MCP-Included-blue">
   <img alt="CCSwitch" src="https://img.shields.io/badge/CCSwitch-Model_Router-purple">
@@ -60,11 +60,12 @@ This is a miniature cost-management operating system for multi-agent coding.
 <h2 align="center">Latest Updates</h2>
 
 <p align="center">
-  <b>Current version: v0.8.0</b>
+  <b>Current version: v0.8.1</b>
 </p>
 
 | Version | What changed | Why it matters |
 | --- | --- | --- |
+| `v0.8.1` | Fixes the Windows Chinese-path fake Claude launcher used by pressure tests, keeps the fake worker cwd equal to the target project cwd, strengthens backup Skill de-prioritization in `skill-route`, and adds selftest regression checks for both issues. | Pressure testing now works on machines with Chinese usernames or Chinese project paths, and Skill Capsule routing is less likely to pick stale `.backup...` Skills when an active Skill exists. |
 | `v0.8.0` | Implements #26: local Skill discovery, `skill-index`, `skill-manual`, stable `skill-route`, compact `skill-capsule`, `--skills auto` for `run`, `run-streaming`, `spawn-role-team`, and mock `workflow-run`, plus MCP tools and run metadata for selected skills, hashes, reasons, modes, bytes, and capsule refs. The scanner now uses root aliases, prunes large/link directories before entering them, and avoids public absolute-path output. | Codex can now give each Claude Code worker the smallest useful Skill Capsule instead of dumping every local Skill or giving none. Codex-only tools are marked as mediated, so workers do not get fake capabilities, and local machine paths stay local. |
 | `v0.7.1` | Fixes #24: manual `workflow-retry-node` now changes the workflow status from `succeeded` to `needs_rerun`, records invalidated nodes, and marks old node handoff/gate/token evidence as stale. | Codex and dashboards no longer accept a workflow that was manually invalidated. Pending nodes must run again before the workflow can be treated as done. |
 | `v0.7.0` | Adds the first workflow DAG controller layer for GitHub issues #20, #21, and #22: YAML/JSON workflow validation, dry-run topological batches, mock workflow execution, structured handoff templates and validation, node gates, retry decisions, loop guard, workflow status, reports, and MCP tools. | Codex can now test long-running multi-agent pipelines as small verifiable nodes instead of one vague conversation. The first version is intentionally mock-safe, controller-owned, and data-backed before spending model quota. |
@@ -82,6 +83,16 @@ This is a miniature cost-management operating system for multi-agent coding.
 | `v0.1.0` | Built the first Skill + MCP + CLI foundation with CCSwitch profile discovery, model scoring, role routing, `CLAUDE.md` generation, visible Claude Code windows, logs, and safe defaults. | Proved the core idea: Codex is the brain, Claude Code is the worker layer, CCSwitch is the local model router. |
 
 <h3 align="center">Detailed Version Notes</h3>
+
+<details open>
+<summary><b>v0.8.1 - Pressure-Test Compatibility Patch</b></summary>
+
+- Fixes the Windows `.cmd` fake Claude launcher used by mock pressure tests when the temp path contains Chinese characters.
+- Keeps fake worker execution in the requested project cwd instead of changing into the launcher directory.
+- Strengthens `skill-route` so stale `.backup...` Skill copies do not outrank the active Skill.
+- Expands `selftest` with regression checks for Chinese-path fake launchers and active-over-backup Skill routing.
+
+</details>
 
 <details open>
 <summary><b>v0.8.0 - Skill Manual and Skill Capsule Routing</b></summary>
