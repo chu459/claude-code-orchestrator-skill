@@ -34,6 +34,8 @@ python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" workspace-status --cwd /path/t
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" folder-policy --cwd /path/to/project --apply
 ```
 
+`init-workspace` 默认会生成 Skill index 和 manual。只想创建目录时，加 `--no-skill-scan`。
+
 整理旧产物或噪声文件：
 
 ```bash
@@ -75,6 +77,20 @@ python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" workflow-run --file examples/w
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" workflow-status --workflow-id WF_ID
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" workflow-report --workflow-id WF_ID
 ```
+
+当 worker 需要本机 Skill 指导时，用 Skill Capsule 路由：
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" skill-index --refresh --cwd /path/to/project
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" skill-manual --write --cwd /path/to/project
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" skill-route --task "Audit install safety" --role security --cwd /path/to/project
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" skill-capsule --task "Audit install safety" --role security --cwd /path/to/project
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" run-streaming "Audit install safety" --role security --cwd /path/to/project --skills auto
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" spawn-role-team "Audit install safety" --roles requirements,security,testing --cwd /path/to/project --skills auto
+```
+
+`--skills auto` 是显式开启。没加时，worker prompt 仍保持旧行为。
+Skill 路由输出使用 root alias 和相对引用，CLI JSON 不暴露本机绝对 Skill 路径。
 
 使用结构化 handoff 合约：
 

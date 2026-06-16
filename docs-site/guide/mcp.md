@@ -49,6 +49,11 @@ docs/mcp.codex.example.toml
 | `cc_stop_run` | Stops one worker by run id |
 | `cc_send_instruction` | Restarts a run with recovered context and a new instruction |
 | `cc_spawn_role_team` | Starts several role workers |
+| `cc_skill_index` | Builds a metadata-only local Skill index |
+| `cc_skill_manual` | Writes the human-readable local Skill manual |
+| `cc_skill_route` | Picks a small Skill shortlist for a task and role |
+| `cc_skill_capsule` | Writes a compact role-specific Skill Capsule |
+| `cc_skill_status` | Reports Skill index/manual/capsule status without rescanning |
 | `cc_collect_team_results` | Summarizes team output |
 | `cc_cross_review` | Starts second-round reviewer workers |
 | `cc_preflight_write_scope` | Writes allowed/denied path rules |
@@ -57,6 +62,8 @@ docs/mcp.codex.example.toml
 | `cc_secret_scan_run` | Scans run logs and diff for secrets |
 | `cc_verify_run` | Runs diff, scope, secret scan, tests, and report |
 | `cc_rollback_run` | Conservatively rolls back a safe run diff |
+
+Skill MCP tools return root aliases and relative refs instead of absolute local Skill paths.
 | `cc_benchmark_model` | Plans or runs one benchmark task |
 | `cc_benchmark_suite` | Plans or runs fixed benchmark tasks |
 | `cc_calibrate_policy` | Saves local model preference notes |

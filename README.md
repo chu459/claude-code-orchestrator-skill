@@ -15,7 +15,7 @@
 <p align="center">
   <a href="README.zh-CN.md"><img alt="README: 中文" src="https://img.shields.io/badge/README-中文-red"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-brightgreen"></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-v0.7.1-black">
+  <img alt="Version" src="https://img.shields.io/badge/version-v0.8.1-black">
   <img alt="Codex Skill" src="https://img.shields.io/badge/Codex-Skill-0A0A0A">
   <img alt="MCP Included" src="https://img.shields.io/badge/MCP-Included-blue">
   <img alt="CCSwitch" src="https://img.shields.io/badge/CCSwitch-Model_Router-purple">
@@ -60,11 +60,13 @@ This is a miniature cost-management operating system for multi-agent coding.
 <h2 align="center">Latest Updates</h2>
 
 <p align="center">
-  <b>Current version: v0.7.1</b>
+  <b>Current version: v0.8.1</b>
 </p>
 
 | Version | What changed | Why it matters |
 | --- | --- | --- |
+| `v0.8.1` | Fixes the Windows Chinese-path fake Claude launcher used by pressure tests, keeps the fake worker cwd equal to the target project cwd, strengthens backup Skill de-prioritization in `skill-route`, and adds selftest regression checks for both issues. | Pressure testing now works on machines with Chinese usernames or Chinese project paths, and Skill Capsule routing is less likely to pick stale `.backup...` Skills when an active Skill exists. |
+| `v0.8.0` | Implements #26: local Skill discovery, `skill-index`, `skill-manual`, stable `skill-route`, compact `skill-capsule`, `--skills auto` for `run`, `run-streaming`, `spawn-role-team`, and mock `workflow-run`, plus MCP tools and run metadata for selected skills, hashes, reasons, modes, bytes, and capsule refs. The scanner now uses root aliases, prunes large/link directories before entering them, and avoids public absolute-path output. | Codex can now give each Claude Code worker the smallest useful Skill Capsule instead of dumping every local Skill or giving none. Codex-only tools are marked as mediated, so workers do not get fake capabilities, and local machine paths stay local. |
 | `v0.7.1` | Fixes #24: manual `workflow-retry-node` now changes the workflow status from `succeeded` to `needs_rerun`, records invalidated nodes, and marks old node handoff/gate/token evidence as stale. | Codex and dashboards no longer accept a workflow that was manually invalidated. Pending nodes must run again before the workflow can be treated as done. |
 | `v0.7.0` | Adds the first workflow DAG controller layer for GitHub issues #20, #21, and #22: YAML/JSON workflow validation, dry-run topological batches, mock workflow execution, structured handoff templates and validation, node gates, retry decisions, loop guard, workflow status, reports, and MCP tools. | Codex can now test long-running multi-agent pipelines as small verifiable nodes instead of one vague conversation. The first version is intentionally mock-safe, controller-owned, and data-backed before spending model quota. |
 | `v0.6.4` | Fixed GitHub issues #16, #17, and #18: final-only output now budgets persisted final text instead of raw stream noise, `--cwd` runs use the cwd-scoped artifact root with a run index for polling, and actual token aggregates are computed from raw `modelUsage` before redaction. | Codex now has measurable evidence for low-noise worker supervision: short final-only tasks no longer die from thinking/system stream noise, project artifacts stay inside the target workspace, and usage dashboards do not report fake zero-token runs. |
@@ -81,6 +83,35 @@ This is a miniature cost-management operating system for multi-agent coding.
 | `v0.1.0` | Built the first Skill + MCP + CLI foundation with CCSwitch profile discovery, model scoring, role routing, `CLAUDE.md` generation, visible Claude Code windows, logs, and safe defaults. | Proved the core idea: Codex is the brain, Claude Code is the worker layer, CCSwitch is the local model router. |
 
 <h3 align="center">Detailed Version Notes</h3>
+
+<details open>
+<summary><b>v0.8.1 - Pressure-Test Compatibility Patch</b></summary>
+
+- Fixes the Windows `.cmd` fake Claude launcher used by mock pressure tests when the temp path contains Chinese characters.
+- Keeps fake worker execution in the requested project cwd instead of changing into the launcher directory.
+- Strengthens `skill-route` so stale `.backup...` Skill copies do not outrank the active Skill.
+- Expands `selftest` with regression checks for Chinese-path fake launchers and active-over-backup Skill routing.
+
+</details>
+
+<details open>
+<summary><b>v0.8.0 - Skill Manual and Skill Capsule Routing</b></summary>
+
+- Implements #26 with an explicit, local-first Skill discovery layer.
+- Adds `skill-index --refresh` to scan local `SKILL.md` metadata without running models or executing scripts.
+- Adds `skill-manual --write` to generate `.agent-workspace/claude-code-orchestrator/skills/skill-manual.md`.
+- Adds `skill-route` to return a stable ranked shortlist for a task and worker role.
+- Adds `skill-capsule` to write compact worker-facing capsules under `.agent-workspace/claude-code-orchestrator/skills/capsules/`.
+- Adds `--skills auto` to `run`, `run-streaming`, `spawn-role-team`, and mock `workflow-run`.
+- Adds MCP tools: `cc_skill_index`, `cc_skill_manual`, `cc_skill_route`, `cc_skill_capsule`, and `cc_skill_status`.
+- Records selected skills, skill hashes, selection reasons, modes, context bytes, and capsule refs in run/team/workflow metadata.
+- Uses stable root aliases such as `codex-skills`, `agents-skills`, and `codex-plugin-cache` so identical relative Skill paths do not collide.
+- Prunes `.git`, `node_modules`, virtualenv, build output, symlink, and junction directories before scanning them.
+- Keeps public CLI/MCP Skill outputs path-safe: no absolute local Skill paths in `skill-index`, `skill-status`, `skill-route`, or worker capsules.
+- Keeps the boundary honest: Codex-only tools are marked `codex_mediated`; workers are not told they can directly use Browser, GitHub connector, Codex apps, or other controller-only capabilities.
+- Expands `selftest` with Skill index, no-secret-leak, stable refresh, routing, compact capsule, path-safe public outputs, ID collision protection, pruned scanning, linked-script safety, workflow metadata, and Codex-only mode checks.
+
+</details>
 
 <details open>
 <summary><b>v0.7.1 - Manual Retry Invalidates Workflow Success</b></summary>
@@ -386,6 +417,32 @@ python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" init-workspace --cwd .
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" workspace-status --cwd .
 ```
 
+<h2 align="center">Skill Capsule Routing</h2>
+
+Build the local Skill map without spending model quota:
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" skill-index --refresh --cwd .
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" skill-manual --write --cwd .
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" skill-status --cwd .
+```
+
+Ask Codex which local Skills fit one worker role:
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" skill-route --task "Audit install safety" --role security --cwd .
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" skill-capsule --task "Audit install safety" --role security --cwd .
+```
+
+Inject a compact capsule only when you ask for it:
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" run-streaming "Audit install safety" --role security --cwd . --skills auto
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" spawn-role-team "Audit install safety" --roles requirements,security,testing --cwd . --skills auto
+```
+
+Default behavior is unchanged. If `--skills auto` is omitted, no Skill Capsule is injected.
+
 <h2 align="center">Common Commands</h2>
 
 Healthcheck:
@@ -419,6 +476,8 @@ python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" init-workspace --cwd /path/to/
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" workspace-status --cwd /path/to/project
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" folder-policy --cwd /path/to/project --apply
 ```
+
+`init-workspace` generates the local Skill index and manual by default. Use `--no-skill-scan` when you want to create folders only.
 
 Write a `CLAUDE.md` worker persona into a project:
 
@@ -521,6 +580,11 @@ python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" last-run
 | `cc_run_status` | List active Claude Code workers or inspect one run |
 | `cc_send_instruction` | Stop and restart a run with recovered context and a new instruction |
 | `cc_spawn_role_team` | Start several role workers at once |
+| `cc_skill_index` | Build a metadata-only local Skill index |
+| `cc_skill_manual` | Write the human-readable local Skill manual |
+| `cc_skill_route` | Pick the smallest useful Skill shortlist for one task and role |
+| `cc_skill_capsule` | Write a compact role-specific Skill Capsule |
+| `cc_skill_status` | Report Skill index/manual/capsule status without rescanning |
 | `cc_collect_team_results` | Summarize team output and mark agreements/conflicts |
 | `cc_cross_review` | Launch second-round reviewer workers |
 | `cc_preflight_write_scope` | Fix allowed paths, denied paths, and max diff before writes |

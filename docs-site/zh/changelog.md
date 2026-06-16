@@ -2,6 +2,26 @@
 
 这里记录 Claude Code Orchestrator Skill 的主要版本变化。
 
+## v0.8.1 - 压测兼容性补丁
+
+- 修复 Windows `.cmd` fake Claude launcher 在中文临时目录、中文用户名路径下被 cmd.exe 读坏的问题。
+- fake worker 现在会保留调用方传入的项目 cwd，不会切到 launcher 所在目录。
+- 加强 `skill-route` 对 `.backup...` Skill 的降权，避免旧备份 Skill 排到 active Skill 前面。
+- selftest 新增中文路径 fake launcher 和 active-over-backup Skill routing 两组回归检查。
+
+## v0.8.0 - Skill 手册与 Skill Capsule 路由
+
+- 实现 GitHub issue #26。
+- 新增 `skill-index --refresh`、`skill-manual --write`、`skill-route`、`skill-capsule`、`skill-status`。
+- `run`、`run-streaming`、`spawn-role-team`、mock `workflow-run` 支持 `--skills auto`。
+- 新增 MCP：`cc_skill_index`、`cc_skill_manual`、`cc_skill_route`、`cc_skill_capsule`、`cc_skill_status`。
+- run/team/workflow metadata 会记录 selected skills、hash、选择原因、模式、上下文字节数、capsule 引用。
+- Skill ID 使用 `codex-skills`、`agents-skills`、`codex-plugin-cache` 这类稳定 root alias，避免不同 Skill 根目录里相同相对路径撞 ID。
+- 扫描前就会剪掉 `.git`、`node_modules`、虚拟环境、构建产物、symlink 和 junction 目录。
+- `skill-index`、`skill-status`、`skill-route` 和 capsule 的公开 CLI/MCP 输出不带本机绝对 Skill 路径。
+- Codex-only 能力会标成 `codex_mediated`，不会让 worker 误以为自己能直接调用 Browser、GitHub connector、Codex apps 等总控专用工具。
+- selftest 新增 Skill 路由、轻量胶囊、刷新稳定性、正文/frontmatter 密钥不泄露、公开输出路径安全、ID 防碰撞、剪枝扫描、link scripts 安全、workflow metadata、Codex-only 模式等检查。
+
 ## v0.7.1 - 手动 retry 会取消 workflow 成功状态
 
 - 修复 GitHub issue #24。

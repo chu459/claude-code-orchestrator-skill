@@ -47,6 +47,11 @@ docs/mcp.codex.example.toml
 | `cc_poll_run` | 默认返回压缩后的总控进度 |
 | `cc_stop_run` | 停止一个 worker |
 | `cc_spawn_role_team` | 一次启动多个角色 worker |
+| `cc_skill_index` | 生成只含安全摘要的本机 Skill 索引 |
+| `cc_skill_manual` | 写入人能看的本机 Skill 手册 |
+| `cc_skill_route` | 给 task + role 选择最小够用 Skill 短名单 |
+| `cc_skill_capsule` | 写入面向 worker 的轻量 Skill Capsule |
+| `cc_skill_status` | 不重新扫描，只查看 Skill 索引、手册、胶囊状态 |
 | `cc_verify_run` | 串起 diff、范围、密钥、测试和报告 |
 | `cc_init_workspace` | 初始化 `.agent-workspace`、模板、策略、回滚和日志目录 |
 | `cc_workspace_status` | 查看 Codex 和 Claude Code 的产物会写到哪里 |
@@ -70,6 +75,8 @@ docs/mcp.codex.example.toml
 | `cc_handoff_validate` | 校验 run 的 `handoff.json` |
 | `cc_handoff_read` | 读取 run 的 `handoff.json` |
 | `cc_handoff_repair_prompt` | 生成补齐 handoff 缺字段的 prompt |
+
+Skill MCP 工具返回 root alias 和相对引用，不返回本机绝对 Skill 路径。
 
 Workflow MCP 工具会把 workflow 文件限制在 `cwd` 或它托管的 `.agent-workspace` 内；不传 `cwd` 时，默认用 MCP server 当前项目目录。
 

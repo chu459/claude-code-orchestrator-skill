@@ -73,6 +73,11 @@ from cc_orchestrator import (
     list_prompt_pack,
     render_prompt_template,
     score_worker,
+    skill_capsule,
+    skill_index,
+    skill_manual,
+    skill_route,
+    skill_status,
     spawn_role_team,
     stop_run,
     summarize_run,
@@ -126,6 +131,7 @@ class RunAgentInput(BaseModel):
     timeout_seconds: Optional[int] = Field(default=None, ge=10, le=1800, description="Optional timeout override.")
     cwd: Optional[str] = Field(default=None, description="Working directory for Claude Code. Defaults to MCP server cwd.")
     context: Optional[str] = Field(default=None, max_length=20000, description="Additional context to append to the prompt.")
+    skills: str = Field(default="off", pattern="^(off|auto)$", description="Use local Skill Capsule routing. Defaults to off.")
 
 
 class RunStreamingAgentInput(RunAgentInput):
@@ -217,6 +223,51 @@ class SpawnRoleTeamInput(BaseModel):
     cwd: Optional[str] = None
     context: Optional[str] = Field(default=None, max_length=20000)
     timeout_seconds: Optional[int] = Field(default=None, ge=10, le=1800)
+    skills: str = Field(default="off", pattern="^(off|auto)$", description="Use local Skill Capsule routing for each role. Defaults to off.")
+
+
+class SkillIndexInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    cwd: Optional[str] = None
+    refresh: bool = Field(default=False, description="Rescan local Skill roots and rewrite skill-index.json.")
+    max_skills: int = Field(default=300, ge=1, le=1000)
+
+
+class SkillManualInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    cwd: Optional[str] = None
+    write: bool = Field(default=True, description="Write skill-manual.md. If false, returns the markdown inline.")
+    refresh: bool = False
+    max_skills: int = Field(default=300, ge=1, le=1000)
+
+
+class SkillRouteInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    task: str = Field(..., min_length=1, max_length=20000)
+    role: str = Field(default="testing", description=ROLE_DESCRIPTION)
+    roles: list[str] = Field(default_factory=list, description="Optional multiple roles to route at once.")
+    cwd: Optional[str] = None
+    max_skills: int = Field(default=3, ge=1, le=10)
+    refresh: bool = False
+
+
+class SkillCapsuleInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    task: str = Field(..., min_length=1, max_length=20000)
+    role: str = Field(default="testing", description=ROLE_DESCRIPTION)
+    cwd: Optional[str] = None
+    max_skills: int = Field(default=3, ge=1, le=10)
+    refresh: bool = False
+
+
+class SkillStatusInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    cwd: Optional[str] = None
 
 
 class CollectTeamResultsInput(BaseModel):
@@ -411,6 +462,7 @@ class InitWorkspaceInput(BaseModel):
     role: str = Field(default="development", description=ROLE_DESCRIPTION)
     write_claude_md: bool = Field(default=True, description="Create or update the managed CLAUDE.md section.")
     repair_mcp: bool = Field(default=False, description="Also repair/create .mcp.json path env values.")
+    scan_skills: bool = Field(default=True, description="Generate local Skill index and manual during initialization.")
 
 
 class WorkspaceStatusInput(BaseModel):
@@ -543,6 +595,7 @@ class WorkflowRunInput(BaseModel):
     cwd: Optional[str] = None
     mock: bool = Field(default=True, description="Run without spending model quota by creating mock node runs. Real DAG execution is intentionally disabled in v0.7.0.")
     loop_guard: int = Field(default=50, ge=1, le=500)
+    skills: str = Field(default="off", pattern="^(off|auto)$", description="Use local Skill Capsule routing for mock worker nodes. Defaults to off.")
 
 
 class WorkflowIdInput(BaseModel):
@@ -739,6 +792,7 @@ async def cc_run_agent(params: RunAgentInput) -> str:
             timeout_seconds=params.timeout_seconds,
             cwd=Path(params.cwd) if params.cwd else None,
             context=params.context,
+            skills=params.skills,
         )
         return _json(data)
     except OrchestratorError as exc:
@@ -780,6 +834,7 @@ async def cc_run_streaming_agent(params: RunStreamingAgentInput) -> str:
             kill_on_excessive_output=params.kill_on_excessive_output,
             final_only=params.final_only,
             final_max_chars=params.final_max_chars,
+            skills=params.skills,
         )
         return _json(data)
     except Exception as exc:
@@ -906,7 +961,53 @@ async def cc_send_instruction(params: SendInstructionInput) -> str:
 async def cc_spawn_role_team(params: SpawnRoleTeamInput) -> str:
     """Start several role-specific streaming Claude Code workers and write a team manifest."""
     try:
-        return _json(spawn_role_team(params.task, roles=params.roles, cwd=Path(params.cwd) if params.cwd else None, context=params.context, timeout_seconds=params.timeout_seconds))
+        return _json(spawn_role_team(params.task, roles=params.roles, cwd=Path(params.cwd) if params.cwd else None, context=params.context, timeout_seconds=params.timeout_seconds, skills=params.skills))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_skill_index", annotations={"title": "Build Skill Index", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
+async def cc_skill_index(params: SkillIndexInput) -> str:
+    """Scan local Skill roots and write a safe metadata-only skill-index.json."""
+    try:
+        return _json(skill_index(cwd=params.cwd, refresh=params.refresh, max_skills=params.max_skills))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_skill_manual", annotations={"title": "Write Skill Manual", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
+async def cc_skill_manual(params: SkillManualInput) -> str:
+    """Write or return the human-readable local Skill manual."""
+    try:
+        return _json(skill_manual(cwd=params.cwd, write=params.write, refresh=params.refresh, max_skills=params.max_skills))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_skill_route", annotations={"title": "Route Skills For Worker", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
+async def cc_skill_route(params: SkillRouteInput) -> str:
+    """Return a stable ranked Skill shortlist for a task and role."""
+    try:
+        roles = params.roles or None
+        return _json(skill_route(task=params.task, role=params.role, roles=roles, cwd=params.cwd, max_skills=params.max_skills, refresh=params.refresh))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_skill_capsule", annotations={"title": "Write Skill Capsule", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False})
+async def cc_skill_capsule(params: SkillCapsuleInput) -> str:
+    """Write a compact role-specific Skill Capsule for a Claude Code worker."""
+    try:
+        return _json(skill_capsule(task=params.task, role=params.role, cwd=params.cwd, max_skills=params.max_skills, refresh=params.refresh))
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(name="cc_skill_status", annotations={"title": "Skill Routing Status", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
+async def cc_skill_status(params: SkillStatusInput) -> str:
+    """Report whether the local Skill index, manual, and capsules exist without rescanning."""
+    try:
+        return _json(skill_status(cwd=params.cwd))
     except Exception as exc:
         return _error(exc)
 
@@ -1133,7 +1234,7 @@ async def cc_mock_stream_test(params: MockStreamTestInput) -> str:
 async def cc_init_workspace(params: InitWorkspaceInput) -> str:
     """Initialize .agent-workspace, templates, policy files, rollback/log dirs, and optional CLAUDE.md."""
     try:
-        return _json(init_workspace(cwd=params.cwd, role=params.role, write_claude=params.write_claude_md, repair_mcp=params.repair_mcp))
+        return _json(init_workspace(cwd=params.cwd, role=params.role, write_claude=params.write_claude_md, repair_mcp=params.repair_mcp, scan_skills=params.scan_skills))
     except Exception as exc:
         return _error(exc)
 
@@ -1412,7 +1513,7 @@ async def cc_workflow_run(params: WorkflowRunInput) -> str:
     """Run a workflow DAG. Use mock=true to validate controller behavior without model quota."""
     try:
         workflow_cwd = Path(params.cwd) if params.cwd else Path.cwd()
-        return _json(workflow_run(params.file, task=params.task, cwd=workflow_cwd, mock=params.mock, loop_guard=params.loop_guard))
+        return _json(workflow_run(params.file, task=params.task, cwd=workflow_cwd, mock=params.mock, loop_guard=params.loop_guard, skills=params.skills))
     except Exception as exc:
         return _error(exc)
 

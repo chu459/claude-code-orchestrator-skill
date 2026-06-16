@@ -173,6 +173,9 @@ SECRET_ASSIGN_RE = re.compile(
     r"(?i)(?:api[_-]?key|secret|token|authorization|auth)\s*[:=]\s*['\"]?([A-Za-z0-9._~+/=\-]{16,})"
 )
 SECRET_NAME_RE = re.compile(r"(?i)\b(?:[A-Z0-9_]*(?:API[_-]?KEY|ACCESS[_-]?TOKEN|AUTH[_-]?TOKEN|SECRET|PASSWORD)[A-Z0-9_]*|authorization)\b")
+WINDOWS_ABS_PATH_RE = re.compile(r"(?i)\b[A-Z]:[\\/][^\s`'\"<>|]+")
+UNC_PATH_RE = re.compile(r"\\\\[A-Za-z0-9_.-]+\\[^\s`'\"<>|]+")
+POSIX_ABS_PATH_RE = re.compile(r"(?<!\w)/(?:Users|home|mnt|Volumes|var|tmp|opt)/[^\s`'\"<>]+")
 PLACEHOLDER_SECRET_RE = re.compile(
     r"(?i)(example|placeholder|dummy|fake|test|mock|sample|your[_-]?|replace[_-]?me|changeme|xxx|xxxx|<[^>]+>|\$\{[^}]+})"
 )
@@ -258,6 +261,57 @@ OUTPUT_BUDGET_DEFAULTS = {
     "policy": "stop",
     "final_only": False,
     "final_max_chars": 20000,
+}
+SKILL_INDEX_SCHEMA_VERSION = 1
+SKILL_SCAN_HEAD_BYTES = 24_000
+SKILL_HASH_MAX_BYTES = 512_000
+SKILL_CAPSULE_MAX_BYTES = 6_000
+SKILL_ROUTE_DEFAULT_MAX = 3
+SKILL_SCAN_MAX_DIRS = 25_000
+SKILL_SCAN_MAX_SECONDS = 15
+SKILL_MODES = {"context_only", "codex_mediated", "worker_callable", "blocked"}
+SKILL_SKIP_DIR_NAMES = {".git", ".hg", ".svn", "node_modules", ".venv", "venv", "__pycache__", ".mypy_cache", ".pytest_cache", ".next", "dist", "build"}
+SKILL_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "by",
+    "for",
+    "from",
+    "how",
+    "into",
+    "of",
+    "on",
+    "or",
+    "the",
+    "this",
+    "to",
+    "use",
+    "when",
+    "with",
+    "add",
+    "run",
+    "skill",
+    "skills",
+    "worker",
+    "workers",
+}
+SKILL_ROLE_KEYWORDS = {
+    "requirements": ["requirement", "planning", "product", "scope", "acceptance", "需求", "规划", "验收"],
+    "architecture": ["architecture", "design", "system", "dag", "routing", "架构", "设计"],
+    "development": ["code", "implement", "bugfix", "frontend", "backend", "script", "开发", "实现", "修复"],
+    "implementation": ["code", "implement", "bugfix", "frontend", "backend", "script", "开发", "实现", "修复"],
+    "testing": ["test", "pytest", "playwright", "qa", "verify", "测试", "验证", "回归"],
+    "review": ["review", "quality", "maintainability", "risk", "审查", "评审", "质量"],
+    "performance": ["performance", "latency", "speed", "memory", "优化", "性能", "耗时"],
+    "compatibility": ["windows", "linux", "macos", "shell", "encoding", "install", "兼容", "安装", "编码"],
+    "documentation": ["docs", "readme", "manual", "guide", "example", "文档", "教程", "示例"],
+    "automation": ["ci", "workflow", "release", "package", "automation", "自动化", "发布"],
+    "security": ["security", "secret", "token", "permission", "audit", "安全", "密钥", "权限"],
+    "ops": ["deploy", "dashboard", "logs", "monitor", "status", "运维", "部署", "日志"],
+    "multimodal": ["image", "vision", "video", "audio", "multimodal", "图片", "视频", "音频", "多模态"],
 }
 CONTROLLER_ARTIFACTS = {
     "progress_summary": "progress_summary.json",
@@ -518,6 +572,7 @@ def workspace_paths(cwd: str | Path | None = None) -> dict[str, Path]:
         "tmp": artifact_root / "tmp",
         "templates": artifact_root / "templates",
         "policies": artifact_root / "policies",
+        "skills": artifact_root / "skills",
     }
 
 
@@ -556,7 +611,7 @@ def ensure_under(root: Path, path: Path) -> Path:
 
 
 def managed_dirs(paths: dict[str, Path]) -> list[Path]:
-    return [paths[name] for name in ("runs", "teams", "reports", "dashboard", "archives", "rollback", "logs", "tmp", "templates", "policies")]
+    return [paths[name] for name in ("runs", "teams", "reports", "dashboard", "archives", "rollback", "logs", "tmp", "templates", "policies", "skills")]
 
 
 def protected_scaffold_dirs(paths: dict[str, Path]) -> set[Path]:
@@ -664,6 +719,7 @@ def init_workspace(
     role: str = "development",
     write_claude: bool = True,
     repair_mcp: bool = False,
+    scan_skills: bool = True,
 ) -> dict[str, Any]:
     paths = workspace_paths(cwd)
     for path in managed_dirs(paths):
@@ -685,6 +741,7 @@ def init_workspace(
                     "- tmp/: temporary files",
                     "- templates/: reusable task/report templates",
                     "- policies/: folder policy and governance files",
+                    "- skills/: local Skill index, manual, and worker capsules",
                     "",
                 ]
             ),
@@ -701,6 +758,11 @@ def init_workspace(
     repair_result: dict[str, Any] | None = None
     if repair_mcp:
         repair_result = repair_mcp_paths(cwd=paths["workspace_root"], apply=True, create=True)
+    skill_scan_result: dict[str, Any] | None = None
+    if scan_skills:
+        index_result = skill_index(cwd=paths["workspace_root"], refresh=True)
+        manual_result = skill_manual(cwd=paths["workspace_root"], write=True, refresh=False)
+        skill_scan_result = {"index": index_result, "manual": manual_result}
     return {
         "ok": True,
         "workspace_root": str(paths["workspace_root"]),
@@ -710,6 +772,7 @@ def init_workspace(
         "folder_policy": policy_result,
         "claude_md": claude_result,
         "mcp_repair": repair_result,
+        "skill_scan": skill_scan_result,
     }
 
 
@@ -741,6 +804,819 @@ def workspace_status(cwd: str | Path | None = None) -> dict[str, Any]:
         "mcp_json": path_info(mcp_path),
         "folder_policy": {"path": str(policy_path), "exists": policy_path.exists(), "policy": policy_data},
     }
+
+
+def skill_workspace_paths(cwd: str | Path | None = None) -> dict[str, Path]:
+    paths = workspace_paths(cwd)
+    skills_dir = paths["skills"]
+    return {
+        "skills": skills_dir,
+        "index": skills_dir / "skill-index.json",
+        "manual": skills_dir / "skill-manual.md",
+        "capsules": skills_dir / "capsules",
+    }
+
+
+def default_skill_scan_roots() -> list[Path]:
+    raw = os.environ.get("CC_ORCHESTRATOR_SKILL_ROOTS")
+    if raw:
+        separator = ";" if os.name == "nt" else ":"
+        parts = [part.strip().strip('"') for part in raw.split(separator) if part.strip()]
+        return [Path(part).expanduser() for part in parts]
+    home = Path.home()
+    return [
+        home / ".codex" / "skills",
+        home / ".agents" / "skills",
+        home / ".codex" / "skills" / ".system",
+        home / ".codex" / "plugins" / "cache",
+    ]
+
+
+def skill_root_alias(root: Path) -> str:
+    expanded = root.expanduser()
+    try:
+        resolved = expanded.resolve()
+    except Exception:
+        resolved = expanded.absolute()
+    home = Path.home().expanduser()
+    known_roots = [
+        ("codex-skills", home / ".codex" / "skills"),
+        ("agents-skills", home / ".agents" / "skills"),
+        ("codex-system-skills", home / ".codex" / "skills" / ".system"),
+        ("codex-plugin-cache", home / ".codex" / "plugins" / "cache"),
+    ]
+    for alias, candidate in known_roots:
+        try:
+            if resolved == candidate.expanduser().resolve():
+                return alias
+        except Exception:
+            continue
+    base = re.sub(r"[^A-Za-z0-9_.-]+", "-", expanded.name or "custom").strip("-").lower() or "custom"
+    digest = hashlib.sha256(str(resolved).encode("utf-8", errors="replace")).hexdigest()[:8]
+    return f"{base}-{digest}"
+
+
+def skill_id_for(root_alias: str, relative: Path | str) -> str:
+    relative_path = Path(relative).as_posix() if not isinstance(relative, str) else relative.replace("\\", "/")
+    return f"{root_alias}:{relative_path}"
+
+
+def workspace_relative_ref(cwd: str | Path | None, path: Path) -> str:
+    paths = workspace_paths(cwd)
+    try:
+        return path.expanduser().resolve().relative_to(paths["workspace_root"].resolve()).as_posix()
+    except Exception:
+        return path.name
+
+
+def safe_skill_root_info(root: Path) -> dict[str, Any]:
+    alias = skill_root_alias(root)
+    try:
+        resolved = root.expanduser().resolve()
+        digest = hashlib.sha256(str(resolved).encode("utf-8", errors="replace")).hexdigest()[:12]
+        return {"alias": alias, "exists": resolved.exists(), "root_hash": digest}
+    except Exception as exc:
+        digest = hashlib.sha256(str(root).encode("utf-8", errors="replace")).hexdigest()[:12]
+        return {"alias": alias, "exists": False, "root_hash": digest, "error": sanitize_skill_public_text(str(exc), 200)}
+
+
+def skill_skip_info(root_alias: str, root: Path, reason: str, path: Path | None = None, error: str | None = None, **extra: Any) -> dict[str, Any]:
+    item: dict[str, Any] = {"root_alias": root_alias, "reason": reason}
+    if path is not None:
+        try:
+            item["relative_path"] = path.resolve().relative_to(root.resolve()).as_posix()
+        except Exception:
+            item["path_hash"] = hashlib.sha256(str(path).encode("utf-8", errors="replace")).hexdigest()[:12]
+    if error:
+        item["error"] = sanitize_skill_public_text(error, 240)
+    item.update(extra)
+    return item
+
+
+def path_has_link(path: Path) -> bool:
+    try:
+        parts = [path, *path.parents]
+        for item in parts:
+            if item.is_symlink():
+                return True
+            if item.exists() or item.is_symlink():
+                attrs = getattr(item.stat(follow_symlinks=False), "st_file_attributes", 0)
+                if attrs & 0x400:
+                    return True
+            is_junction = getattr(item, "is_junction", None)
+            if callable(is_junction) and is_junction():
+                return True
+    except OSError:
+        return True
+    return False
+
+
+def is_skipped_skill_path(path: Path) -> bool:
+    return any(part in SKILL_SKIP_DIR_NAMES for part in path.parts)
+
+
+def discover_skill_files(max_skills: int = 300) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    files: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    seen: set[Path] = set()
+    started = time.time()
+    visited_dirs = 0
+    for root in default_skill_scan_roots():
+        root_alias = skill_root_alias(root)
+        expanded_root = root.expanduser()
+        if path_has_link(expanded_root):
+            skipped.append(skill_skip_info(root_alias, expanded_root, "root_is_link"))
+            continue
+        try:
+            resolved_root = expanded_root.resolve()
+        except Exception as exc:
+            skipped.append(skill_skip_info(root_alias, expanded_root, "root_resolve_failed", error=str(exc)))
+            continue
+        if not resolved_root.exists():
+            skipped.append(skill_skip_info(root_alias, resolved_root, "root_missing"))
+            continue
+        if path_has_link(resolved_root):
+            skipped.append(skill_skip_info(root_alias, resolved_root, "root_is_link"))
+            continue
+        try:
+            for current, dirnames, filenames in os.walk(resolved_root, topdown=True, followlinks=False):
+                if time.time() - started > SKILL_SCAN_MAX_SECONDS:
+                    skipped.append(skill_skip_info(root_alias, resolved_root, "scan_timeout", seconds=SKILL_SCAN_MAX_SECONDS))
+                    return files, skipped
+                visited_dirs += 1
+                if visited_dirs > SKILL_SCAN_MAX_DIRS:
+                    skipped.append(skill_skip_info(root_alias, resolved_root, "max_dirs_reached", max_dirs=SKILL_SCAN_MAX_DIRS))
+                    return files, skipped
+                current_path = Path(current)
+                kept_dirs: list[str] = []
+                for dirname in dirnames:
+                    child = current_path / dirname
+                    if dirname in SKILL_SKIP_DIR_NAMES:
+                        skipped.append(skill_skip_info(root_alias, resolved_root, "skipped_directory", path=child))
+                        continue
+                    if path_has_link(child):
+                        skipped.append(skill_skip_info(root_alias, resolved_root, "path_contains_link", path=child))
+                        continue
+                    kept_dirs.append(dirname)
+                dirnames[:] = kept_dirs
+                if "SKILL.md" not in filenames:
+                    continue
+                path = current_path / "SKILL.md"
+                if len(files) >= max_skills:
+                    skipped.append(skill_skip_info(root_alias, resolved_root, "max_skills_reached", max_skills=max_skills))
+                    return files, skipped
+                if path_has_link(path):
+                    skipped.append(skill_skip_info(root_alias, resolved_root, "path_contains_link", path=path))
+                    continue
+                try:
+                    resolved = path.resolve()
+                except Exception as exc:
+                    skipped.append(skill_skip_info(root_alias, resolved_root, "path_resolve_failed", path=path, error=str(exc)))
+                    continue
+                if resolved in seen:
+                    continue
+                if is_skipped_skill_path(resolved):
+                    skipped.append(skill_skip_info(root_alias, resolved_root, "skipped_directory", path=resolved))
+                    continue
+                try:
+                    relative = resolved.relative_to(resolved_root)
+                except ValueError:
+                    skipped.append(skill_skip_info(root_alias, resolved_root, "outside_scan_root", path=resolved))
+                    continue
+                seen.add(resolved)
+                files.append({"path": resolved, "root": resolved_root, "relative": relative, "root_alias": root_alias})
+        except Exception as exc:
+            skipped.append(skill_skip_info(root_alias, resolved_root, "scan_failed", error=str(exc)))
+    return files, skipped
+
+
+def read_skill_head(path: Path, max_bytes: int = SKILL_SCAN_HEAD_BYTES) -> str:
+    with path.open("rb") as handle:
+        data = handle.read(max_bytes)
+    return data.decode("utf-8-sig", errors="replace")
+
+
+def parse_skill_frontmatter(head: str) -> tuple[dict[str, str], str]:
+    lines = head.splitlines()
+    metadata: dict[str, str] = {}
+    body_start = 0
+    if lines and lines[0].strip() == "---":
+        for index, line in enumerate(lines[1:], start=1):
+            if line.strip() == "---":
+                body_start = index + 1
+                break
+            match = re.match(r"^([A-Za-z0-9_-]+):\s*(.*)$", line)
+            if match:
+                key = match.group(1).strip().lower()
+                value = match.group(2).strip().strip('"').strip("'")
+                metadata[key] = value
+    return metadata, "\n".join(lines[body_start:])
+
+
+def first_markdown_heading(text: str) -> str | None:
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            return stripped.lstrip("#").strip() or None
+    return None
+
+
+def short_text(value: str, limit: int = 280) -> str:
+    cleaned = re.sub(r"\s+", " ", value or "").strip()
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: limit - 1].rstrip() + "..."
+
+
+def sanitize_skill_public_text(value: str, limit: int | None = None) -> str:
+    text = CONTROL_CHAR_RE.sub("\uFFFD", value or "")
+    text = SECRET_ASSIGN_RE.sub(lambda match: match.group(0).replace(match.group(1), "[REDACTED_SECRET]"), text)
+    text = SECRET_VALUE_RE.sub("[REDACTED_SECRET]", text)
+    text = UNC_PATH_RE.sub("[LOCAL_PATH]", text)
+    text = WINDOWS_ABS_PATH_RE.sub("[LOCAL_PATH]", text)
+    text = POSIX_ABS_PATH_RE.sub("[LOCAL_PATH]", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if limit is not None:
+        return short_text(text, limit)
+    return text
+
+
+def skill_terms(text: str) -> set[str]:
+    terms = {item.lower() for item in re.findall(r"[A-Za-z0-9_.+-]{2,}", text or "")}
+    for chunk in re.findall(r"[\u4e00-\u9fff]{2,}", text or ""):
+        terms.add(chunk)
+        for size in (2, 3, 4):
+            if len(chunk) >= size:
+                terms.update(chunk[index : index + size] for index in range(0, len(chunk) - size + 1))
+    return {term for term in terms if len(term) >= 2 and term not in SKILL_STOPWORDS}
+
+
+def count_files_limited(path: Path, limit: int = 500) -> int:
+    if not path.exists() or not path.is_dir() or path_has_link(path):
+        return 0
+    count = 0
+    try:
+        for current, dirnames, filenames in os.walk(path, topdown=True, followlinks=False):
+            current_path = Path(current)
+            kept_dirs: list[str] = []
+            for dirname in dirnames:
+                child = current_path / dirname
+                if dirname in SKILL_SKIP_DIR_NAMES or path_has_link(child):
+                    continue
+                kept_dirs.append(dirname)
+            dirnames[:] = kept_dirs
+            count += len(filenames)
+            if count >= limit:
+                return limit
+    except OSError:
+        return count
+    return count
+
+
+def skill_content_hash(path: Path) -> tuple[str, str]:
+    size = path.stat().st_size
+    with path.open("rb") as handle:
+        data = handle.read(SKILL_HASH_MAX_BYTES + 1)
+    if len(data) <= SKILL_HASH_MAX_BYTES:
+        return hashlib.sha256(data).hexdigest(), "full"
+    digest = hashlib.sha256(data[:SKILL_HASH_MAX_BYTES] + str(size).encode("utf-8")).hexdigest()
+    return digest, "prefix_with_size"
+
+
+def classify_skill_mode(skill_path: Path, text: str, scripts_count: int) -> tuple[str, str]:
+    lower = text.lower()
+    path_text = str(skill_path).lower()
+    blocked_terms = [
+        "send dm",
+        "send dms",
+        "private message",
+        "reply comments",
+        "post tweet",
+        "post tweets",
+        "publish post",
+        "payment",
+        "stripe",
+        "rm -rf",
+        "remove-item",
+        "format ",
+        "douyin",
+        "抖音",
+        "私信",
+        "评论",
+        "批量回复",
+    ]
+    if any(term in lower for term in blocked_terms):
+        return "blocked", "high side-effect Skill; keep under Codex control and do not inject into workers."
+    codex_only_terms = [
+        "codex",
+        "tool_search",
+        "connector",
+        "browser",
+        "chrome",
+        "image_gen",
+        "codex_app",
+        "app://",
+        "plugin",
+        "mcp tool",
+    ]
+    if ".codex\\plugins\\cache" in path_text or ".codex/plugins/cache" in path_text:
+        return "codex_mediated", "plugin or bundled Codex capability; worker must ask Codex to mediate tools."
+    if any(term in lower for term in codex_only_terms):
+        return "codex_mediated", "mentions Codex-only or connector-style tools; worker receives guidance only."
+    if scripts_count and any(term in lower for term in ["cli", "command", "python", "node", "powershell", "script"]):
+        return "worker_callable", "contains local scripts or command guidance that a worker may call if available."
+    return "context_only", "safe as written guidance; no direct special tool access assumed."
+
+
+def classify_skill_risk(text: str, mode: str) -> tuple[str, list[str]]:
+    lower = text.lower()
+    notes: list[str] = []
+    high_terms = ["delete", "remove-item", "rm -rf", "credential", "secret", "api key", "token", "password", "login", "private message", "dm"]
+    medium_terms = ["write", "post", "reply", "publish", "github", "browser", "chrome", "network", "payment", "deploy"]
+    if any(term in lower for term in high_terms):
+        notes.append("May touch credentials, login, messaging, or destructive actions.")
+        return "high", notes
+    if mode == "codex_mediated" or any(term in lower for term in medium_terms):
+        notes.append("Requires controller review before tool use or external side effects.")
+        return "medium", notes
+    return "low", notes
+
+
+def infer_skill_tool_dependencies(text: str) -> list[str]:
+    lower = text.lower()
+    candidates = {
+        "python": ["python", ".py"],
+        "node": ["node", "npm", "pnpm", "vite"],
+        "git": ["git ", "github", "gh "],
+        "mcp": ["mcp"],
+        "browser": ["browser", "playwright", "chrome"],
+        "image": ["image", "gpt-image"],
+        "ffmpeg": ["ffmpeg"],
+        "adb": ["adb"],
+        "powershell": ["powershell", "pwsh"],
+    }
+    deps = []
+    for name, terms in candidates.items():
+        if any(term in lower for term in terms):
+            deps.append(name)
+    return deps
+
+
+def infer_skill_roles(name: str, description: str, keywords: set[str]) -> list[str]:
+    text = f"{name} {description}".lower()
+    roles: list[tuple[int, str]] = []
+    for role, terms in SKILL_ROLE_KEYWORDS.items():
+        score = 0
+        for term in terms:
+            lowered = term.lower()
+            if lowered in text or lowered in keywords:
+                score += 1
+        if score:
+            roles.append((score, role))
+    roles.sort(key=lambda item: (-item[0], ROLE_ORDER.index(item[1]) if item[1] in ROLE_ORDER else 99, item[1]))
+    return [role for _, role in roles[:4]] or ["requirements"]
+
+
+def skill_context_budget(size_bytes: int) -> str:
+    if size_bytes <= 6_000:
+        return "small"
+    if size_bytes <= 30_000:
+        return "medium"
+    return "large"
+
+
+def build_skill_record(item: dict[str, Any], precomputed_hash: tuple[str, str] | None = None) -> dict[str, Any]:
+    path = Path(item["path"])
+    root = Path(item["root"])
+    relative = Path(item["relative"])
+    root_alias = str(item.get("root_alias") or skill_root_alias(root))
+    head = read_skill_head(path)
+    metadata, body = parse_skill_frontmatter(head)
+    raw_name = metadata.get("name") or first_markdown_heading(body) or relative.parent.name or path.parent.name
+    raw_description = metadata.get("description") or "\n".join(body.splitlines()[:4])
+    name = sanitize_skill_public_text(raw_name, 120)
+    description = sanitize_skill_public_text(raw_description, 500)
+    scripts_count = count_files_limited(path.parent / "scripts")
+    assets_count = count_files_limited(path.parent / "assets")
+    references_count = count_files_limited(path.parent / "references")
+    hash_value, hash_scope = precomputed_hash or skill_content_hash(path)
+    text_for_classification = f"{raw_name}\n{raw_description}\n{head[:4000]}"
+    mode, mode_reason = classify_skill_mode(path, text_for_classification, scripts_count)
+    risk, risk_notes = classify_skill_risk(text_for_classification, mode)
+    keywords = skill_terms(f"{name} {description}")
+    roles = infer_skill_roles(name, description, keywords)
+    relative_path = relative.as_posix()
+    skill_id = skill_id_for(root_alias, relative_path)
+    return {
+        "skill_id": skill_id,
+        "name": name,
+        "description": description,
+        "root_alias": root_alias,
+        "relative_path": relative_path,
+        "skill_ref": f"{root_alias}/{relative_path}",
+        "keywords": sorted(keywords)[:80],
+        "recommended_roles": roles,
+        "mode": mode,
+        "mode_reason": mode_reason,
+        "risk": risk,
+        "risk_notes": risk_notes,
+        "tool_dependencies": infer_skill_tool_dependencies(text_for_classification),
+        "scripts_count": scripts_count,
+        "assets_count": assets_count,
+        "references_count": references_count,
+        "content_hash": hash_value,
+        "content_hash_short": hash_value[:16],
+        "content_hash_scope": hash_scope,
+        "context_budget": skill_context_budget(path.stat().st_size),
+        "skill_md_bytes": path.stat().st_size,
+        "indexed_head_bytes": min(path.stat().st_size, SKILL_SCAN_HEAD_BYTES),
+    }
+
+
+def skill_index(cwd: str | Path | None = None, refresh: bool = False, max_skills: int = 300) -> dict[str, Any]:
+    paths = skill_workspace_paths(cwd)
+    index_path = paths["index"]
+    index_ref = workspace_relative_ref(cwd, index_path)
+    if index_path.exists() and not refresh:
+        data = read_json_file(index_path, {})
+        if data:
+            return {"ok": True, "refreshed": False, "path": index_ref, "index_path": index_ref, **data}
+    started = time.time()
+    previous = read_json_file(index_path, {}) if index_path.exists() else {}
+    previous_records = {str(item.get("skill_id")): item for item in previous.get("skills", []) if item.get("skill_id")}
+    previous_hashes = {skill_id: item.get("content_hash") for skill_id, item in previous_records.items()}
+    files, skipped = discover_skill_files(max_skills=max_skills)
+    records: list[dict[str, Any]] = []
+    parse_errors: list[dict[str, Any]] = []
+    reused_count = 0
+    rebuilt_count = 0
+    for item in files:
+        try:
+            path = Path(item["path"])
+            root = Path(item["root"])
+            relative = Path(item["relative"])
+            root_alias = str(item.get("root_alias") or skill_root_alias(root))
+            skill_id = skill_id_for(root_alias, relative)
+            hash_value, hash_scope = skill_content_hash(path)
+            previous_record = previous_records.get(skill_id)
+            if previous_record and previous_record.get("content_hash") == hash_value:
+                record = dict(previous_record)
+                record.pop("path", None)
+                record.pop("root", None)
+                record["root_alias"] = root_alias
+                record["relative_path"] = relative.as_posix()
+                record["skill_ref"] = f"{root_alias}/{relative.as_posix()}"
+                record["content_hash_scope"] = hash_scope
+                records.append(record)
+                reused_count += 1
+            else:
+                records.append(build_skill_record(item, precomputed_hash=(hash_value, hash_scope)))
+                rebuilt_count += 1
+        except Exception as exc:
+            parse_errors.append(skill_skip_info(str(item.get("root_alias") or "unknown"), Path(item.get("root") or "."), "parse_failed", path=Path(item.get("path") or "."), error=str(exc)))
+    records.sort(key=lambda item: (item.get("name", "").lower(), item.get("relative_path", "")))
+    current_hashes = {str(item.get("skill_id")): item.get("content_hash") for item in records}
+    changed = sorted(skill_id for skill_id, value in current_hashes.items() if previous_hashes.get(skill_id) != value)
+    removed = sorted(skill_id for skill_id in previous_hashes if skill_id not in current_hashes)
+    unchanged = sorted(skill_id for skill_id, value in current_hashes.items() if previous_hashes.get(skill_id) == value)
+    data = {
+        "schema_version": SKILL_INDEX_SCHEMA_VERSION,
+        "index_version": f"{SKILL_INDEX_SCHEMA_VERSION}.{int(time.time())}",
+        "generated_at": utc_now_iso(),
+        "skill_roots": [safe_skill_root_info(root) for root in default_skill_scan_roots()],
+        "skill_count": len(records),
+        "max_skills": max_skills,
+        "scan": {
+            "scanned": len(files),
+            "indexed": len(records),
+            "skipped": len(skipped) + len(parse_errors),
+            "changed": len(changed),
+            "unchanged": len(unchanged),
+            "removed": len(removed),
+            "reused": reused_count,
+            "rebuilt": rebuilt_count,
+            "duration_ms": int((time.time() - started) * 1000),
+        },
+        "changed_skill_ids": changed[:100],
+        "removed_skill_ids": removed[:100],
+        "skipped": skipped[:120] + parse_errors[:120],
+        "skills": records,
+    }
+    write_json_file(index_path, data)
+    return {"ok": True, "refreshed": True, "path": index_ref, "index_path": index_ref, **data}
+
+
+def skill_status(cwd: str | Path | None = None) -> dict[str, Any]:
+    paths = skill_workspace_paths(cwd)
+    index_data = read_json_file(paths["index"], {}) if paths["index"].exists() else {}
+    capsules = []
+    if paths["capsules"].exists():
+        capsules = sorted(paths["capsules"].glob("*.md"), key=lambda item: item.stat().st_mtime, reverse=True)
+    return {
+        "ok": True,
+        "skills_dir": workspace_relative_ref(cwd, paths["skills"]),
+        "index_path": workspace_relative_ref(cwd, paths["index"]),
+        "manual_path": workspace_relative_ref(cwd, paths["manual"]),
+        "capsules_dir": workspace_relative_ref(cwd, paths["capsules"]),
+        "index_exists": paths["index"].exists(),
+        "manual_exists": paths["manual"].exists(),
+        "skill_count": int(index_data.get("skill_count") or 0),
+        "generated_at": index_data.get("generated_at"),
+        "schema_version": index_data.get("schema_version"),
+        "capsule_count": len(capsules),
+        "latest_capsules": [workspace_relative_ref(cwd, path) for path in capsules[:5]],
+        "scan_roots": [safe_skill_root_info(root) for root in default_skill_scan_roots()],
+    }
+
+
+def skill_manual(cwd: str | Path | None = None, write: bool = True, refresh: bool = False, max_skills: int = 300) -> dict[str, Any]:
+    index = skill_index(cwd=cwd, refresh=refresh, max_skills=max_skills)
+    paths = skill_workspace_paths(cwd)
+    lines = [
+        "# Local Skill Manual",
+        "",
+        f"- Generated: {index.get('generated_at')}",
+        f"- Indexed skills: {index.get('skill_count')}",
+        "- Worker rule: Claude Code receives only compact Skill Capsules. Codex-only tools stay Codex-mediated.",
+        "",
+        "## Inventory",
+        "",
+        "| Skill | Best roles | Mode | Risk | Summary |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for item in index.get("skills", []):
+        roles = ", ".join(item.get("recommended_roles") or [])
+        summary = str(item.get("description") or "").replace("|", "\\|")
+        lines.append(f"| `{item.get('name')}` | {roles} | `{item.get('mode')}` | `{item.get('risk')}` | {summary} |")
+    lines.extend(
+        [
+            "",
+            "## Mode Guide",
+            "",
+            "- `context_only`: use the Skill as written guidance only.",
+            "- `codex_mediated`: the worker may ask Codex to use the tool, but must not claim direct access.",
+            "- `worker_callable`: the Skill exposes local command guidance the worker may run if available and in scope.",
+            "- `blocked`: do not route to workers.",
+            "",
+            "## Safety Notes",
+            "",
+            "- Indexing does not execute Skill scripts.",
+            "- Capsules should stay small and role-scoped.",
+            "- Public index, route, status, and capsule outputs use root aliases and relative refs instead of absolute local Skill paths.",
+            "",
+        ]
+    )
+    text = "\n".join(lines)
+    if write:
+        paths["manual"].parent.mkdir(parents=True, exist_ok=True)
+        paths["manual"].write_text(text, encoding="utf-8")
+    return {"ok": True, "written": write, "path": workspace_relative_ref(cwd, paths["manual"]), "bytes": len(text.encode("utf-8")), "skill_count": index.get("skill_count"), "manual": text if not write else None}
+
+
+def route_score_skill(skill: dict[str, Any], task: str, role: str) -> tuple[int, list[str]]:
+    if skill.get("mode") == "blocked":
+        return -10_000, ["blocked"]
+    reasons: list[str] = []
+    task_terms = skill_terms(task)
+    skill_keywords = set(str(item).lower() for item in skill.get("keywords") or [])
+    name_desc_terms = skill_terms(f"{skill.get('name')} {skill.get('description')}")
+    all_skill_terms = skill_keywords | name_desc_terms
+    overlap = sorted(task_terms & all_skill_terms)
+    score = len(overlap) * 12
+    if overlap:
+        reasons.append("keyword match: " + ", ".join(overlap[:6]))
+    elif task_terms:
+        score -= 12
+        reasons.append("no task keyword overlap")
+    roles = [str(item) for item in skill.get("recommended_roles") or []]
+    if role in roles:
+        score += 8
+        reasons.append(f"role match: {role}")
+    role_terms = set(term.lower() for term in SKILL_ROLE_KEYWORDS.get(role, []))
+    role_overlap = sorted(role_terms & all_skill_terms)
+    if role_overlap:
+        score += len(role_overlap) * 3
+        reasons.append("role keyword match: " + ", ".join(role_overlap[:4]))
+    name = str(skill.get("name") or "").lower()
+    if name and name in task.lower():
+        score += 15
+        reasons.append("skill name appears in task")
+    if skill.get("mode") == "codex_mediated":
+        score -= 3
+        reasons.append("Codex-mediated, so routed conservatively")
+    if skill.get("risk") == "high":
+        score -= 8
+        reasons.append("high-risk Skill; controller review required")
+    elif skill.get("risk") == "medium":
+        score -= 2
+    if "backup" in str(skill.get("relative_path") or "").lower():
+        score -= 24
+        reasons.append("backup copy ranked lower than active Skill")
+    return score, reasons or ["fallback ranking"]
+
+
+def skill_route(
+    task: str,
+    role: str = "testing",
+    roles: list[str] | None = None,
+    cwd: str | Path | None = None,
+    max_skills: int = SKILL_ROUTE_DEFAULT_MAX,
+    refresh: bool = False,
+) -> dict[str, Any]:
+    if not task.strip():
+        raise OrchestratorError("Task cannot be empty.")
+    index = skill_index(cwd=cwd, refresh=refresh, max_skills=300)
+    selected_roles = roles or [role]
+    route_map: dict[str, list[dict[str, Any]]] = {}
+    for current_role in selected_roles:
+        scored: list[tuple[int, str, dict[str, Any], list[str]]] = []
+        for item in index.get("skills", []):
+            score, reasons = route_score_skill(item, task, current_role)
+            if score <= 0:
+                continue
+            scored.append((score, str(item.get("name", "")), item, reasons))
+        scored.sort(key=lambda entry: (-entry[0], entry[1].lower(), str(entry[2].get("relative_path", ""))))
+        selected_items: list[dict[str, Any]] = []
+        seen_names: set[str] = set()
+        for score, _, item, reasons in scored:
+            name_key = str(item.get("name") or item.get("skill_id") or "").strip().lower()
+            if name_key in seen_names:
+                continue
+            seen_names.add(name_key)
+            selected_items.append(
+                {
+                "skill_id": item.get("skill_id"),
+                "name": item.get("name"),
+                "description": item.get("description"),
+                "root_alias": item.get("root_alias"),
+                "relative_path": item.get("relative_path"),
+                "skill_ref": item.get("skill_ref"),
+                "mode": item.get("mode"),
+                "risk": item.get("risk"),
+                "risk_notes": item.get("risk_notes"),
+                "tool_dependencies": item.get("tool_dependencies"),
+                "recommended_roles": item.get("recommended_roles"),
+                "content_hash": item.get("content_hash"),
+                "content_hash_short": item.get("content_hash_short"),
+                "estimated_context_bytes": min(int(item.get("skill_md_bytes") or 0), SKILL_CAPSULE_MAX_BYTES),
+                "score": score,
+                "selection_reason": sanitize_skill_public_text("; ".join(reasons), 500),
+                "mode_reason": sanitize_skill_public_text(str(item.get("mode_reason") or ""), 300),
+            }
+            )
+            if len(selected_items) >= max_skills:
+                break
+        route_map[current_role] = selected_items
+    primary = route_map.get(role, [])
+    return {
+        "ok": True,
+        "task": task,
+        "role": role,
+        "roles": selected_roles,
+        "index_path": index.get("index_path") or index.get("path"),
+        "skill_index_version": index.get("index_version"),
+        "generated_at": index.get("generated_at"),
+        "skill_count": index.get("skill_count"),
+        "selected": primary,
+        "selected_count": len(primary),
+        "routes": route_map,
+    }
+
+
+def capsule_file_name(role: str) -> str:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    safe_role = re.sub(r"[^A-Za-z0-9_.-]+", "-", role.strip().lower() or "worker").strip("-")
+    return f"{safe_role}-{stamp}-{uuid.uuid4().hex[:6]}.md"
+
+
+def skill_capsule_text(task: str, role: str, route: dict[str, Any]) -> str:
+    selected = route.get("selected") or []
+    lines = [
+        "# Skill Capsule",
+        "",
+        f"- Worker role: `{role}`",
+        f"- Task: {sanitize_skill_public_text(task, 300)}",
+        f"- Skill index version: `{route.get('skill_index_version')}`",
+        "",
+        "Codex selected this small capsule. Do not assume you can call Codex-only tools directly.",
+        "",
+        "## Selected Skills",
+        "",
+    ]
+    if not selected:
+        lines.append("- No local Skill was relevant enough. Continue with the role prompt and return evidence.")
+    for item in selected:
+        lines.extend(
+            [
+                f"### {item.get('name')}",
+                "",
+                f"- Skill id: `{item.get('skill_id')}`",
+                f"- Mode: `{item.get('mode')}`",
+                f"- Risk: `{item.get('risk')}`",
+                f"- Why selected: {sanitize_skill_public_text(str(item.get('selection_reason') or ''), 500)}",
+                f"- Summary: {sanitize_skill_public_text(str(item.get('description') or ''), 500)}",
+                f"- Boundary: {sanitize_skill_public_text(str(item.get('mode_reason') or ''), 300)}",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "## Hard Rules",
+            "",
+            "- Use this capsule as guidance, not as permission to exceed the write scope.",
+            "- If a Skill is `codex_mediated`, ask Codex to use the tool instead of claiming direct access.",
+            "- Do not print secrets, credentials, tokens, or hidden config.",
+            "- Do not read or modify unrelated files.",
+            "- If the capsule is insufficient, say what extra context Codex should provide.",
+            "",
+            "## Required Handoff Evidence",
+            "",
+            "- What you inspected.",
+            "- What you changed or decided not to change.",
+            "- Tests or checks run.",
+            "- Risks, blockers, and exact files touched.",
+            "",
+        ]
+    )
+    text = "\n".join(lines).rstrip() + "\n"
+    encoded = text.encode("utf-8")
+    if len(encoded) <= SKILL_CAPSULE_MAX_BYTES:
+        return text
+    trimmed_lines: list[str] = []
+    total = 0
+    for line in lines:
+        line_bytes = len((line + "\n").encode("utf-8"))
+        if total + line_bytes > SKILL_CAPSULE_MAX_BYTES - 120:
+            break
+        trimmed_lines.append(line)
+        total += line_bytes
+    trimmed_lines.extend(["", "_Capsule trimmed to stay within context budget._", ""])
+    return "\n".join(trimmed_lines)
+
+
+def skill_capsule(
+    task: str,
+    role: str = "testing",
+    cwd: str | Path | None = None,
+    max_skills: int = SKILL_ROUTE_DEFAULT_MAX,
+    refresh: bool = False,
+) -> dict[str, Any]:
+    route = skill_route(task=task, role=role, cwd=cwd, max_skills=max_skills, refresh=refresh)
+    paths = skill_workspace_paths(cwd)
+    paths["capsules"].mkdir(parents=True, exist_ok=True)
+    text = skill_capsule_text(task, role, route)
+    capsule_path = paths["capsules"] / capsule_file_name(role)
+    capsule_path.write_text(text, encoding="utf-8")
+    selected = route.get("selected") or []
+    return {
+        "ok": True,
+        "task": task,
+        "role": role,
+        "selected": selected,
+        "selected_count": len(selected),
+        "skill_index_version": route.get("skill_index_version"),
+        "skill_hashes": {str(item.get("skill_id")): item.get("content_hash") for item in selected},
+        "skill_selection_reasons": {str(item.get("skill_id")): item.get("selection_reason") for item in selected},
+        "skill_modes": {str(item.get("skill_id")): item.get("mode") for item in selected},
+        "skill_context_bytes": len(text.encode("utf-8")),
+        "capsule_path": workspace_relative_ref(cwd, capsule_path),
+        "capsule_text": text,
+    }
+
+
+def skill_metadata_from_capsule(capsule: dict[str, Any], enabled: bool) -> dict[str, Any]:
+    selected = capsule.get("selected") or []
+    return {
+        "enabled": enabled,
+        "mode": "auto" if enabled else "off",
+        "selected_skills": [item.get("name") for item in selected],
+        "selected_skill_ids": [item.get("skill_id") for item in selected],
+        "skill_index_version": capsule.get("skill_index_version"),
+        "skill_hashes": capsule.get("skill_hashes") or {},
+        "skill_selection_reasons": capsule.get("skill_selection_reasons") or {},
+        "skill_context_bytes": capsule.get("skill_context_bytes") or 0,
+        "skill_modes": capsule.get("skill_modes") or {},
+        "capsule_path": capsule.get("capsule_path"),
+        "selected_count": len(selected),
+    }
+
+
+def prepare_skill_context(task: str, role: str, cwd: str | Path | None, skills: str | None) -> tuple[str | None, dict[str, Any]]:
+    mode = (skills or "off").strip().lower()
+    if mode in {"", "off", "none", "false", "no"}:
+        return None, skill_metadata_from_capsule({}, enabled=False)
+    if mode != "auto":
+        raise OrchestratorError("skills must be 'off' or 'auto'.")
+    capsule = skill_capsule(task=task, role=role, cwd=cwd)
+    metadata = skill_metadata_from_capsule(capsule, enabled=True)
+    if not capsule.get("selected"):
+        return None, metadata
+    return str(capsule.get("capsule_text") or ""), metadata
+
+
+def merge_context(*parts: str | None) -> str | None:
+    merged = [part.strip() for part in parts if part and part.strip()]
+    return "\n\n".join(merged) if merged else None
 
 
 def unique_destination(path: Path) -> Path:
@@ -2634,6 +3510,7 @@ def healthcheck() -> dict[str, Any]:
         "version_path": str(VERSION_PATH),
         "prompt_pack_exists": PROMPT_PACK_DIR.exists(),
         "prompt_pack_path": str(PROMPT_PACK_DIR),
+        "skill_status": skill_status(),
     }
     try:
         profiles = list_profiles()
@@ -2744,6 +3621,7 @@ def run_agent(
     cwd: Path | None = None,
     context: str | None = None,
     output_format: str = "json",
+    skills: str | None = "off",
 ) -> dict[str, Any]:
     if not task.strip():
         raise OrchestratorError("Task cannot be empty.")
@@ -2762,7 +3640,8 @@ def run_agent(
     run_dir = paths["runs"] / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
     register_run_dir(run_id, run_dir, paths["workspace_root"], paths["artifact_root"])
-    prompt = build_prompt(role, task, context, artifact_root=paths["artifact_root"])
+    skill_context, skill_routing = prepare_skill_context(task, role, effective_cwd, skills)
+    prompt = build_prompt(role, task, merge_context(context, skill_context), artifact_root=paths["artifact_root"])
     safe_prompt = str(redact(prompt))
     prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
     env = build_worker_env(provider.env, route.get("model_override"), workspace_root=paths["workspace_root"], artifact_root=paths["artifact_root"])
@@ -2800,6 +3679,14 @@ def run_agent(
         "prompt_sha256": prompt_hash,
         "route_reason": route.get("reason", ""),
         "command": redact(cmd),
+        "skill_routing": skill_routing,
+        "selected_skills": skill_routing.get("selected_skills", []),
+        "skill_index_version": skill_routing.get("skill_index_version"),
+        "skill_hashes": skill_routing.get("skill_hashes", {}),
+        "skill_selection_reasons": skill_routing.get("skill_selection_reasons", {}),
+        "skill_context_bytes": skill_routing.get("skill_context_bytes", 0),
+        "skill_modes": skill_routing.get("skill_modes", {}),
+        "capsule_path": skill_routing.get("capsule_path"),
     }
     metadata["git_before"] = capture_git_snapshot(run_dir, effective_cwd, "before")
     write_metadata(run_dir, metadata)
@@ -2890,6 +3777,7 @@ def run_streaming_agent(
     final_only: bool = False,
     final_max_chars: int | None = None,
     skip_cost_guard: bool = False,
+    skills: str | None = "off",
 ) -> dict[str, Any]:
     """Start Claude Code in the background and stream events to events.ndjson."""
     if not task.strip():
@@ -2933,7 +3821,8 @@ def run_streaming_agent(
     run_dir = paths["runs"] / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
     register_run_dir(run_id, run_dir, paths["workspace_root"], paths["artifact_root"])
-    prompt = build_prompt(role, task, context, artifact_root=paths["artifact_root"])
+    skill_context, skill_routing = prepare_skill_context(task, role, effective_cwd, skills)
+    prompt = build_prompt(role, task, merge_context(context, skill_context), artifact_root=paths["artifact_root"])
     safe_prompt = str(redact(prompt))
     prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
     prompt_path = run_dir / "prompt.txt"
@@ -2987,6 +3876,14 @@ def run_streaming_agent(
         "events_path": str(events_path),
         "worker_pid": None,
         "child_pid": None,
+        "skill_routing": skill_routing,
+        "selected_skills": skill_routing.get("selected_skills", []),
+        "skill_index_version": skill_routing.get("skill_index_version"),
+        "skill_hashes": skill_routing.get("skill_hashes", {}),
+        "skill_selection_reasons": skill_routing.get("skill_selection_reasons", {}),
+        "skill_context_bytes": skill_routing.get("skill_context_bytes", 0),
+        "skill_modes": skill_routing.get("skill_modes", {}),
+        "capsule_path": skill_routing.get("capsule_path"),
     }
     metadata["git_before"] = capture_git_snapshot(run_dir, effective_cwd, "before")
     write_metadata(run_dir, metadata)
@@ -3703,6 +4600,7 @@ def spawn_role_team(
     cwd: Path | None = None,
     context: str | None = None,
     timeout_seconds: int | None = None,
+    skills: str | None = "off",
 ) -> dict[str, Any]:
     if not task.strip():
         raise OrchestratorError("Task cannot be empty.")
@@ -3711,6 +4609,7 @@ def spawn_role_team(
         raise OrchestratorError("At least one role is required.")
     team_id = "team-" + new_run_id()
     runs: list[dict[str, Any]] = []
+    team_skill_routing: dict[str, Any] = {}
     rollback: dict[str, Any] | None = None
     active_before = 0
     max_concurrent = max_concurrent_limit()
@@ -3729,6 +4628,7 @@ def spawn_role_team(
                 "active_before": active_before,
                 "max_concurrent": max_concurrent,
                 "requested_count": requested_count,
+                "skills": skills or "off",
                 "rollback": {"attempted": False, "stops": []},
             }
             path = write_team_manifest(team_id, manifest)
@@ -3754,9 +4654,11 @@ def spawn_role_team(
                     context="\n".join(part for part in [f"Team id: {team_id}", context or ""] if part),
                     timeout_seconds=timeout_seconds,
                     skip_cost_guard=True,
+                    skills=skills,
                 )
                 update_metadata(safe_run_dir(str(run["run_id"])), team_id=team_id)
-                runs.append({"role": role, "run_id": run["run_id"], "status": run["status"], "profile": run.get("profile")})
+                team_skill_routing[role] = run.get("skill_routing") or {}
+                runs.append({"role": role, "run_id": run["run_id"], "status": run["status"], "profile": run.get("profile"), "skill_routing": run.get("skill_routing")})
         except Exception as exc:
             stops = []
             for item in runs:
@@ -3786,6 +4688,8 @@ def spawn_role_team(
                 "active_before": active_before,
                 "max_concurrent": max_concurrent,
                 "requested_count": len(selected_roles),
+                "skills": skills or "off",
+                "skill_routing": team_skill_routing,
                 "rollback": rollback,
             }
             path = write_team_manifest(team_id, manifest)
@@ -3813,6 +4717,8 @@ def spawn_role_team(
         "active_before": active_before,
         "max_concurrent": max_concurrent,
         "requested_count": len(selected_roles),
+        "skills": skills or "off",
+        "skill_routing": team_skill_routing,
         "rollback": rollback,
     }
     path = write_team_manifest(team_id, manifest)
@@ -3826,6 +4732,7 @@ def spawn_role_team(
         "requested_count": len(selected_roles),
         "launched_count": len(runs),
         "runs": runs,
+        "skill_routing": team_skill_routing,
         "rollback": rollback,
     }
 
@@ -5510,7 +6417,18 @@ def write_fake_claude_launcher(directory: Path) -> Path:
     )
     if os.name == "nt":
         launcher = directory / "fake-claude.cmd"
-        launcher.write_text(f"@echo off\r\n\"{sys.executable}\" \"{script}\"\r\n", encoding="utf-8")
+        launcher.write_text(
+            "\r\n".join(
+                [
+                    "@echo off",
+                    "setlocal",
+                    f'"{sys.executable}" "%~dp0fake_claude.py"',
+                    "exit /b %ERRORLEVEL%",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
     else:
         launcher = directory / "fake-claude"
         launcher.write_text(f"#!/usr/bin/env sh\nexec \"{sys.executable}\" \"{script}\"\n", encoding="utf-8")
@@ -6428,9 +7346,9 @@ def workflow_write_report(workflow_id: str, cwd: Path | None = None) -> dict[str
     return {"ok": True, "workflow_id": workflow_id, "status": status.get("status"), "report_path": str(path)}
 
 
-def workflow_run(file: str | Path, task: str, cwd: Path | None = None, mock: bool = False, loop_guard: int = 50) -> dict[str, Any]:
+def workflow_run(file: str | Path, task: str, cwd: Path | None = None, mock: bool = False, loop_guard: int = 50, skills: str | None = "off") -> dict[str, Any]:
     if not mock:
-        raise OrchestratorError("Real workflow-run is not enabled in v0.7.0. Use --mock to validate the controller without spending model quota.")
+        raise OrchestratorError("Real workflow-run is not enabled yet. Use --mock to validate the controller without spending model quota.")
     spec = load_workflow_spec(file, cwd=cwd)
     validation = validate_workflow_spec(spec)
     if not validation.get("ok"):
@@ -6449,6 +7367,7 @@ def workflow_run(file: str | Path, task: str, cwd: Path | None = None, mock: boo
         "task": task,
         "cwd": str((cwd or Path.cwd()).resolve()),
         "mock": mock,
+        "skills": skills or "off",
         "created_at": utc_now_iso(),
     }
     write_json_file(workflow_dir / "manifest.json", manifest)
@@ -6469,6 +7388,11 @@ def workflow_run(file: str | Path, task: str, cwd: Path | None = None, mock: boo
                 "retry_count": 0,
             }
             for node_id, node in nodes.items()
+        },
+        "skill_routing": {
+            "enabled": (skills or "off").strip().lower() == "auto",
+            "mode": (skills or "off").strip().lower(),
+            "nodes": {},
         },
         "decisions": [],
     }
@@ -6546,6 +7470,7 @@ def workflow_run(file: str | Path, task: str, cwd: Path | None = None, mock: boo
                     final_only=bool((spec.get("defaults") or {}).get("final_only", True)),
                     max_output_bytes=int((spec.get("defaults") or {}).get("max_output_bytes") or OUTPUT_BUDGET_DEFAULTS["max_output_bytes"]),
                     max_events_bytes=int((spec.get("defaults") or {}).get("max_events_bytes") or OUTPUT_BUDGET_DEFAULTS["max_events_bytes"]),
+                    skills=skills,
                 )
                 node_state.update({"state": "running", "run_id": run["run_id"]})
                 status["decisions"].append({"ts": utc_now_iso(), "node_id": node_id, "decision": "advance", "reason": "worker launched", "next_nodes": []})
@@ -6553,6 +7478,12 @@ def workflow_run(file: str | Path, task: str, cwd: Path | None = None, mock: boo
                 continue
             attempt = int(node_state.get("attempts") or 0)
             node_state["state"] = "running"
+            skill_info: dict[str, Any] | None = None
+            if (skills or "off").strip().lower() == "auto":
+                node_task = f"{task}\n\nWorkflow node {node_id}: {node.get('task') or ''}"
+                _, skill_info = prepare_skill_context(node_task, str(node.get("role") or "implementation"), cwd or Path.cwd(), skills)
+                node_state["skill_routing"] = skill_info
+                status.setdefault("skill_routing", {}).setdefault("nodes", {})[node_id] = skill_info
             result = create_mock_workflow_run_node(paths, workflow_dir, workflow_id, node_id, node, attempt)
             node_state.pop("stale_evidence", None)
             node_state["attempts"] = attempt + 1
@@ -6594,7 +7525,7 @@ def workflow_run(file: str | Path, task: str, cwd: Path | None = None, mock: boo
 
 def workflow_status(workflow_id: str, cwd: Path | None = None) -> dict[str, Any]:
     status = read_workflow_status(workflow_id, cwd=cwd)
-    return {"ok": True, "workflow_id": workflow_id, "status": status.get("status"), "nodes": status.get("nodes"), "decisions": status.get("decisions"), "path": str(safe_workflow_dir(workflow_id, cwd=cwd) / "status.json")}
+    return {"ok": True, "workflow_id": workflow_id, "status": status.get("status"), "nodes": status.get("nodes"), "skill_routing": status.get("skill_routing"), "decisions": status.get("decisions"), "path": str(safe_workflow_dir(workflow_id, cwd=cwd) / "status.json")}
 
 
 def workflow_retry_node(workflow_id: str, node_id: str, cwd: Path | None = None) -> dict[str, Any]:
@@ -6900,11 +7831,188 @@ def selftest() -> dict[str, Any]:
     prompt_pack = list_prompt_pack()
     with tempfile.TemporaryDirectory(prefix="cc-orchestrator-selftest-") as tmp:
         init_workspace(cwd=tmp, write_claude=False)
+        init_skill_status = skill_status(cwd=tmp)
+        no_scan_workspace = Path(tmp) / "no-skill-scan"
+        init_no_scan_result = init_workspace(cwd=no_scan_workspace, write_claude=False, scan_skills=False)
+        init_no_scan_status = skill_status(cwd=no_scan_workspace)
         clean_after_init = clean_workspace(cwd=tmp, dry_run=True)
+        fake_skill_root = Path(tmp) / "fake-skills"
+        windows_skill_dir = fake_skill_root / "windows-encoding"
+        backup_windows_skill_dir = fake_skill_root / "windows-encoding.backup.20260616"
+        codex_skill_dir = fake_skill_root / "codex-browser"
+        blocked_skill_dir = fake_skill_root / "douyin-reply"
+        no_frontmatter_dir = fake_skill_root / "plain-skill"
+        skipped_node_modules_skill_dir = fake_skill_root / "node_modules" / "nested-skill"
+        (windows_skill_dir / "scripts").mkdir(parents=True)
+        backup_windows_skill_dir.mkdir(parents=True)
+        codex_skill_dir.mkdir(parents=True)
+        blocked_skill_dir.mkdir(parents=True)
+        no_frontmatter_dir.mkdir(parents=True)
+        skipped_node_modules_skill_dir.mkdir(parents=True)
+        fake_secret_value = "sk-" + ("x" * 32)
+        fake_frontmatter_secret = "sk-" + ("f" * 32)
+        fake_frontmatter_path = "C:\\Users\\Alice\\.codex\\skills\\secret\\SKILL.md" if os.name == "nt" else "/home/alice/.codex/skills/secret/SKILL.md"
+        (windows_skill_dir / "SKILL.md").write_text(
+            "\n".join(
+                [
+                    "---",
+                    "name: windows-chinese-encoding",
+                    f"description: Diagnose Windows PowerShell UTF-8 encoding and Chinese mojibake issues with token {fake_frontmatter_secret} and path {fake_frontmatter_path}.",
+                    "---",
+                    "",
+                    "# Windows Encoding",
+                    "",
+                    f"Never leak this fake key: {fake_secret_value}",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (windows_skill_dir / "scripts" / "check.py").write_text("print('ok')\n", encoding="utf-8")
+        (backup_windows_skill_dir / "SKILL.md").write_text(
+            "\n".join(
+                [
+                    "---",
+                    "name: windows-chinese-encoding",
+                    "description: Backup copy with extra compatibility keywords that should not outrank the active Skill.",
+                    "---",
+                    "",
+                    "# Windows Encoding Backup",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        linked_scripts_tested = False
+        linked_scripts_target = Path(tmp) / "linked-scripts-target"
+        linked_scripts_target.mkdir()
+        (linked_scripts_target / "hidden.py").write_text("print('should not count through link')\n", encoding="utf-8")
+        linked_scripts_path = blocked_skill_dir / "scripts"
+        try:
+            if os.name == "nt":
+                link_proc = subprocess.run(
+                    ["cmd", "/c", "mklink", "/J", str(linked_scripts_path), str(linked_scripts_target)],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+                linked_scripts_tested = link_proc.returncode == 0
+            else:
+                linked_scripts_path.symlink_to(linked_scripts_target, target_is_directory=True)
+                linked_scripts_tested = True
+        except OSError:
+            linked_scripts_tested = False
+        (codex_skill_dir / "SKILL.md").write_text(
+            "\n".join(
+                [
+                    "---",
+                    "name: codex-browser-github",
+                    "description: Use Browser plugin, Chrome connector, and GitHub app through Codex mediation.",
+                    "---",
+                    "",
+                    "# Codex Browser GitHub",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (blocked_skill_dir / "SKILL.md").write_text(
+            "\n".join(
+                [
+                    "---",
+                    "name: douyin-reply-danger",
+                    "description: Reply comments and send DM messages through Douyin.",
+                    "---",
+                    "",
+                    "# Douyin Reply",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (no_frontmatter_dir / "SKILL.md").write_text("# Plain Skill\n\nTesting guidance without frontmatter.\n", encoding="utf-8")
+        (skipped_node_modules_skill_dir / "SKILL.md").write_text(
+            "---\nname: node-module-danger\ndescription: should be pruned before indexing\n---\n",
+            encoding="utf-8",
+        )
+        junction_root_blocked = True
+        junction_root_tested = False
+        if os.name == "nt":
+            junction_target = Path(tmp) / "junction-target"
+            junction_target_skill = junction_target / "linked-skill"
+            junction_target_skill.mkdir(parents=True)
+            (junction_target_skill / "SKILL.md").write_text("---\nname: linked-skill\ndescription: should be skipped\n---\n", encoding="utf-8")
+            junction_root = Path(tmp) / "junction-root"
+            proc = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(junction_root), str(junction_target)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            junction_root_tested = proc.returncode == 0
+            if junction_root_tested:
+                previous_junction_roots = os.environ.get("CC_ORCHESTRATOR_SKILL_ROOTS")
+                os.environ["CC_ORCHESTRATOR_SKILL_ROOTS"] = str(junction_root)
+                try:
+                    junction_result = skill_index(cwd=tmp, refresh=True, max_skills=10)
+                    skipped_reasons = [item.get("reason") for item in junction_result.get("skipped", [])]
+                    junction_root_blocked = junction_result.get("skill_count") == 0 and "root_is_link" in skipped_reasons
+                finally:
+                    if previous_junction_roots is None:
+                        os.environ.pop("CC_ORCHESTRATOR_SKILL_ROOTS", None)
+                    else:
+                        os.environ["CC_ORCHESTRATOR_SKILL_ROOTS"] = previous_junction_roots
+        previous_skill_roots = os.environ.get("CC_ORCHESTRATOR_SKILL_ROOTS")
+        os.environ["CC_ORCHESTRATOR_SKILL_ROOTS"] = str(fake_skill_root)
+        try:
+            skill_index_first = skill_index(cwd=tmp, refresh=True, max_skills=10)
+            skill_index_second = skill_index(cwd=tmp, refresh=True, max_skills=10)
+            skill_manual_result = skill_manual(cwd=tmp, write=True, refresh=False)
+            skill_manual_text = skill_workspace_paths(tmp)["manual"].read_text(encoding="utf-8", errors="replace")
+            skill_route_result = skill_route("Fix Windows UTF-8 encoding tests", role="compatibility", cwd=tmp)
+            skill_capsule_result = skill_capsule("Audit Browser connector and GitHub app access", role="security", cwd=tmp)
+            skill_status_result = skill_status(cwd=tmp)
+            skill_context_text, skill_run_metadata = prepare_skill_context("Fix Windows UTF-8 encoding tests", "compatibility", tmp, "auto")
+        finally:
+            if previous_skill_roots is None:
+                os.environ.pop("CC_ORCHESTRATOR_SKILL_ROOTS", None)
+            else:
+                os.environ["CC_ORCHESTRATOR_SKILL_ROOTS"] = previous_skill_roots
+        collision_root_a = Path(tmp) / "a" / "skills"
+        collision_root_b = Path(tmp) / "b" / "skills"
+        (collision_root_a / "same").mkdir(parents=True)
+        (collision_root_b / "same").mkdir(parents=True)
+        (collision_root_a / "same" / "SKILL.md").write_text("---\nname: same-one\ndescription: first same relative path\n---\n", encoding="utf-8")
+        (collision_root_b / "same" / "SKILL.md").write_text("---\nname: same-two\ndescription: second same relative path\n---\n", encoding="utf-8")
+        previous_collision_roots = os.environ.get("CC_ORCHESTRATOR_SKILL_ROOTS")
+        separator = ";" if os.name == "nt" else ":"
+        os.environ["CC_ORCHESTRATOR_SKILL_ROOTS"] = f"{collision_root_a}{separator}{collision_root_b}"
+        try:
+            collision_index = skill_index(cwd=Path(tmp) / "collision-project", refresh=True, max_skills=10)
+        finally:
+            if previous_collision_roots is None:
+                os.environ.pop("CC_ORCHESTRATOR_SKILL_ROOTS", None)
+            else:
+                os.environ["CC_ORCHESTRATOR_SKILL_ROOTS"] = previous_collision_roots
         chinese_root = Path(tmp) / "中文项目"
         chinese_root.mkdir()
         json_path = write_json_file(chinese_root / "metadata.json", {"prompt": "中文✅\x01", "path": str(chinese_root)})
         json_roundtrip = json.loads(json_path.read_text(encoding="utf-8"))
+        launcher_root = Path(tmp) / "涓枃 fake launcher"
+        launcher_root.mkdir()
+        fake_launcher = write_fake_claude_launcher(launcher_root)
+        fake_launcher_env = force_utf8_env(dict(os.environ))
+        fake_launcher_env["CC_ORCHESTRATOR_FAKE_STEPS"] = "1"
+        fake_launcher_env["CC_ORCHESTRATOR_FAKE_DELAY"] = "0"
+        fake_launcher_proc = subprocess.run(
+            [str(fake_launcher), "-p", "--output-format", "stream-json", "prompt"],
+            cwd=str(chinese_root),
+            env=fake_launcher_env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+        )
+        fake_launcher_first = json.loads(fake_launcher_proc.stdout.splitlines()[0]) if fake_launcher_proc.stdout.splitlines() else {}
         change_split = classify_change_paths(
             chinese_root,
             [
@@ -6976,6 +8084,16 @@ nodes:
         workflow_dry = workflow_dry_run(workflow_path, task="mock task", cwd=Path(tmp))
         workflow_mock = workflow_run(workflow_path, task="mock task", cwd=Path(tmp), mock=True)
         workflow_mock_status = workflow_status(str(workflow_mock.get("workflow_id")), cwd=Path(tmp))
+        previous_workflow_skill_roots = os.environ.get("CC_ORCHESTRATOR_SKILL_ROOTS")
+        os.environ["CC_ORCHESTRATOR_SKILL_ROOTS"] = str(fake_skill_root)
+        try:
+            workflow_mock_with_skills = workflow_run(workflow_path, task="mock task with skills", cwd=Path(tmp), mock=True, skills="auto")
+            workflow_mock_with_skills_status = workflow_status(str(workflow_mock_with_skills.get("workflow_id")), cwd=Path(tmp))
+        finally:
+            if previous_workflow_skill_roots is None:
+                os.environ.pop("CC_ORCHESTRATOR_SKILL_ROOTS", None)
+            else:
+                os.environ["CC_ORCHESTRATOR_SKILL_ROOTS"] = previous_workflow_skill_roots
         workflow_report_text = Path(str(workflow_mock.get("report_path"))).read_text(encoding="utf-8")
         workflow_id = str(workflow_mock.get("workflow_id"))
         workflow_dir = safe_workflow_dir(workflow_id, cwd=Path(tmp))
@@ -7050,6 +8168,19 @@ nodes:
         max_retry_status = max_retry_run.get("status") or {}
         max_retry_nodes = max_retry_status.get("nodes") or {}
         max_retry_decisions = max_retry_status.get("decisions") or []
+    skill_index_text = json.dumps(skill_index_first, ensure_ascii=False)
+    skill_route_text = json.dumps(skill_route_result, ensure_ascii=False)
+    skill_capsule_text_value = str(skill_capsule_result.get("capsule_text") or "")
+    skill_auto_context_text_value = str(skill_context_text or "")
+    skill_status_text = json.dumps(skill_status_result, ensure_ascii=False)
+    collision_ids = [str(item.get("skill_id")) for item in collision_index.get("skills", [])]
+    indexed_skill_names = [str(item.get("name")) for item in skill_index_first.get("skills", [])]
+    server_text = (ROOT / "server.py").read_text(encoding="utf-8", errors="replace") if (ROOT / "server.py").exists() else ""
+    codex_skill_record = next((item for item in skill_index_first.get("skills", []) if item.get("name") == "codex-browser-github"), {})
+    blocked_skill_record = next((item for item in skill_index_first.get("skills", []) if item.get("name") == "douyin-reply-danger"), {})
+    route_names = [str(item.get("name")) for item in skill_route_result.get("selected", [])]
+    route_windows_record = next((item for item in skill_route_result.get("selected", []) if item.get("name") == "windows-chinese-encoding"), {})
+    workflow_skill_routing = workflow_mock_with_skills_status.get("skill_routing") or {}
     checks = {
         "utf8_env": env.get("PYTHONIOENCODING") == "utf-8" and env.get("PYTHONUTF8") == "1",
         "timeout_bytes_decode": decoded == "中文✅",
@@ -7067,6 +8198,7 @@ nodes:
         "actual_model_usage_detects_mismatch": actual_route.get("actual_model") == "glm-5.2" and actual_route.get("actual_total_tokens") == 125 and actual_route.get("route_mismatch"),
         "actual_model_usage_allowlist": "apiKey" not in actual_route.get("actual_model_usage", {}).get("glm-5.2", {}),
         "utf8_json_roundtrip": json_roundtrip.get("prompt") == "中文✅�" and "中文项目" in str(json_roundtrip.get("path")),
+        "fake_launcher_handles_chinese_path": fake_launcher_proc.returncode == 0 and Path(str(fake_launcher_first.get("cwd") or "")).resolve() == chinese_root.resolve(),
         "change_split_source_vs_artifact": change_split["project_source_changes"]["changed_count"] == 1 and change_split["agent_artifact_changes"]["changed_count"] == 1,
         "run_id_validation": run_id_rejected,
         "worker_env_allowlist": "ANTHROPIC_API_KEY" in worker_env and "GITHUB_TOKEN" not in worker_env and "NPM_TOKEN" not in worker_env,
@@ -7075,6 +8207,38 @@ nodes:
         "worker_env_artifact_root": worker_env.get("CC_ORCHESTRATOR_ARTIFACT_ROOT") == str(ARTIFACT_ROOT),
         "folder_policy_generated_only": "Only manage agent-generated artifacts" in str(policy.get("policy", {}).get("principle", "")),
         "clean_workspace_preserves_scaffold": clean_after_init.get("action_count") == 0,
+        "init_workspace_generates_skill_map": init_skill_status.get("index_exists") and init_skill_status.get("manual_exists"),
+        "init_workspace_can_disable_skill_scan": init_no_scan_result.get("ok") and not init_no_scan_status.get("index_exists") and not init_no_scan_status.get("manual_exists"),
+        "skill_index_finds_fake_skills": skill_index_first.get("skill_count") == 5 and skill_index_first.get("scan", {}).get("indexed") == 5,
+        "skill_index_refresh_unchanged": skill_index_second.get("scan", {}).get("changed") == 0 and skill_index_second.get("scan", {}).get("unchanged") == 5,
+        "skill_index_refresh_reuses_unchanged": skill_index_second.get("scan", {}).get("reused") == 5 and skill_index_second.get("scan", {}).get("rebuilt") == 0,
+        "skill_index_does_not_store_body_secret": fake_secret_value not in skill_index_text,
+        "skill_index_does_not_store_frontmatter_secret": fake_frontmatter_secret not in skill_index_text,
+        "skill_index_redacts_frontmatter_path_text": fake_frontmatter_path not in skill_index_text,
+        "skill_index_public_omits_absolute_root": str(fake_skill_root) not in skill_index_text,
+        "skill_status_public_omits_absolute_root": str(fake_skill_root) not in skill_status_text,
+        "skill_route_public_omits_absolute_root": str(fake_skill_root) not in skill_route_text,
+        "skill_ids_stable_and_unique_across_same_named_roots": collision_index.get("skill_count") == 2 and len(collision_ids) == len(set(collision_ids)),
+        "skill_prunes_node_modules_before_indexing": "node-module-danger" not in indexed_skill_names and any(item.get("reason") == "skipped_directory" for item in skill_index_first.get("skipped", [])),
+        "skill_linked_scripts_not_counted": (not linked_scripts_tested) or blocked_skill_record.get("scripts_count") == 0,
+        "skill_manual_redacts_frontmatter_secret": fake_frontmatter_secret not in skill_manual_text,
+        "skill_manual_redacts_frontmatter_path": fake_frontmatter_path not in skill_manual_text,
+        "skill_route_redacts_frontmatter_secret": fake_frontmatter_secret not in skill_route_text,
+        "skill_route_redacts_frontmatter_path": fake_frontmatter_path not in skill_route_text,
+        "skill_manual_written": skill_manual_result.get("written") and int(skill_manual_result.get("bytes") or 0) > 0,
+        "skill_route_selects_compatibility_skill": "windows-chinese-encoding" in route_names,
+        "skill_route_prefers_active_over_backup": "backup" not in str(route_windows_record.get("relative_path") or "").lower(),
+        "skill_capsule_is_compact": 0 < int(skill_capsule_result.get("skill_context_bytes") or 0) <= SKILL_CAPSULE_MAX_BYTES,
+        "skill_capsule_omits_absolute_root": str(fake_skill_root) not in skill_capsule_text_value,
+        "skill_capsule_redacts_frontmatter_secret": fake_frontmatter_secret not in skill_auto_context_text_value,
+        "skill_capsule_redacts_frontmatter_path": fake_frontmatter_path not in skill_auto_context_text_value,
+        "skill_codex_only_not_worker_callable": codex_skill_record.get("mode") == "codex_mediated",
+        "skill_blocked_mode_classified": blocked_skill_record.get("mode") == "blocked",
+        "skill_junction_root_blocked": junction_root_blocked,
+        "skill_symlink_detection_source_present": "is_symlink" in Path(__file__).read_text(encoding="utf-8", errors="replace"),
+        "skill_route_mcp_not_marked_readonly": 'name="cc_skill_route"' in server_text and '"readOnlyHint": False' in server_text,
+        "skill_status_reports_index": skill_status_result.get("index_exists") and skill_status_result.get("skill_count") == 5,
+        "skill_auto_context_metadata": bool(skill_context_text) and skill_run_metadata.get("enabled") and skill_run_metadata.get("selected_count", 0) >= 1,
         "workflow_validate_accepts_valid_dag": workflow_valid.get("ok") and workflow_valid.get("node_count") == 6 and workflow_valid.get("edge_count", 0) >= 5,
         "workflow_validate_rejects_outside_cwd": workflow_cwd_scope_rejected,
         "workflow_simple_yaml_fallback_parser": simple_yaml_validation.get("ok") and simple_yaml_validation.get("node_count") == 3,
@@ -7089,6 +8253,7 @@ nodes:
         "handoff_validate_accepts_valid_handoff": bool(valid_handoff_result.get("ok")),
         "handoff_validate_reports_missing_fields": not invalid_handoff_result.get("ok") and "status" in invalid_handoff_result.get("missing_fields", []),
         "workflow_mock_run_succeeds": workflow_mock.get("ok") and workflow_mock.get("status", {}).get("status") == "succeeded",
+        "workflow_skill_routing_top_level": workflow_skill_routing.get("enabled") is True and bool(workflow_skill_routing.get("nodes")),
         "workflow_tampered_index_rejected": tampered_workflow_index_rejected,
         "workflow_real_run_requires_mock": real_workflow_run_rejected,
         "manual_retry_marks_needs_rerun": manual_retry_result.get("ok")
@@ -7209,6 +8374,7 @@ def main() -> int:
     init_ws.add_argument("--role", default="development")
     init_ws.add_argument("--no-claude-md", action="store_true")
     init_ws.add_argument("--repair-mcp", action="store_true")
+    init_ws.add_argument("--no-skill-scan", action="store_true")
     ws_status = sub.add_parser("workspace-status")
     ws_status.add_argument("--cwd")
     migrate_cmd = sub.add_parser("migrate-data")
@@ -7232,6 +8398,30 @@ def main() -> int:
     policy_cmd = sub.add_parser("folder-policy")
     policy_cmd.add_argument("--cwd")
     policy_cmd.add_argument("--apply", action="store_true")
+    skill_index_cmd = sub.add_parser("skill-index")
+    skill_index_cmd.add_argument("--cwd")
+    skill_index_cmd.add_argument("--refresh", action="store_true")
+    skill_index_cmd.add_argument("--max-skills", type=int, default=300)
+    skill_manual_cmd = sub.add_parser("skill-manual")
+    skill_manual_cmd.add_argument("--cwd")
+    skill_manual_cmd.add_argument("--write", action="store_true")
+    skill_manual_cmd.add_argument("--refresh", action="store_true")
+    skill_manual_cmd.add_argument("--max-skills", type=int, default=300)
+    skill_route_cmd = sub.add_parser("skill-route")
+    skill_route_cmd.add_argument("--task", required=True)
+    skill_route_cmd.add_argument("--role", default="testing")
+    skill_route_cmd.add_argument("--roles")
+    skill_route_cmd.add_argument("--cwd")
+    skill_route_cmd.add_argument("--max-skills", type=int, default=SKILL_ROUTE_DEFAULT_MAX)
+    skill_route_cmd.add_argument("--refresh", action="store_true")
+    skill_capsule_cmd = sub.add_parser("skill-capsule")
+    skill_capsule_cmd.add_argument("--task", required=True)
+    skill_capsule_cmd.add_argument("--role", default="testing")
+    skill_capsule_cmd.add_argument("--cwd")
+    skill_capsule_cmd.add_argument("--max-skills", type=int, default=SKILL_ROUTE_DEFAULT_MAX)
+    skill_capsule_cmd.add_argument("--refresh", action="store_true")
+    skill_status_cmd = sub.add_parser("skill-status")
+    skill_status_cmd.add_argument("--cwd")
     lp = sub.add_parser("list-profiles")
     lp.add_argument("--include-secrets", action="store_true")
     pick = sub.add_parser("pick")
@@ -7246,6 +8436,8 @@ def main() -> int:
     run.add_argument("--allow-write", action="store_true")
     run.add_argument("--timeout-seconds", type=int)
     run.add_argument("--cwd")
+    run.add_argument("--context")
+    run.add_argument("--skills", choices=["off", "auto"], default="off")
     stream = sub.add_parser("run-streaming")
     stream.add_argument("task")
     stream.add_argument("--role", default="implementation")
@@ -7255,6 +8447,7 @@ def main() -> int:
     stream.add_argument("--timeout-seconds", type=int)
     stream.add_argument("--cwd")
     stream.add_argument("--context")
+    stream.add_argument("--skills", choices=["off", "auto"], default="off")
     stream.add_argument("--no-include-partial-messages", action="store_true")
     stream.add_argument("--max-output-bytes", type=int)
     stream.add_argument("--max-events-bytes", type=int)
@@ -7315,6 +8508,7 @@ def main() -> int:
     team.add_argument("--cwd")
     team.add_argument("--context")
     team.add_argument("--timeout-seconds", type=int)
+    team.add_argument("--skills", choices=["off", "auto"], default="off")
     collect = sub.add_parser("collect-team-results")
     collect.add_argument("--team-id")
     collect.add_argument("--run-id", action="append", dest="run_ids")
@@ -7477,6 +8671,7 @@ def main() -> int:
     workflow_run_cmd.add_argument("--cwd")
     workflow_run_cmd.add_argument("--mock", action="store_true")
     workflow_run_cmd.add_argument("--loop-guard", type=int, default=50)
+    workflow_run_cmd.add_argument("--skills", choices=["off", "auto"], default="off")
     workflow_status_cmd = sub.add_parser("workflow-status")
     workflow_status_cmd.add_argument("--workflow-id", required=True)
     workflow_status_cmd.add_argument("--cwd")
@@ -7520,7 +8715,7 @@ def main() -> int:
         if args.command == "healthcheck":
             print_json(healthcheck())
         elif args.command == "init-workspace":
-            print_json(init_workspace(cwd=args.cwd, role=args.role, write_claude=not args.no_claude_md, repair_mcp=args.repair_mcp))
+            print_json(init_workspace(cwd=args.cwd, role=args.role, write_claude=not args.no_claude_md, repair_mcp=args.repair_mcp, scan_skills=not args.no_skill_scan))
         elif args.command == "workspace-status":
             print_json(workspace_status(cwd=args.cwd))
         elif args.command == "migrate-data":
@@ -7533,6 +8728,17 @@ def main() -> int:
             print_json(repair_mcp_paths(cwd=args.cwd, mcp_path=args.mcp_path, apply=args.apply, create=args.create))
         elif args.command == "folder-policy":
             print_json(folder_policy(cwd=args.cwd, apply=args.apply))
+        elif args.command == "skill-index":
+            print_json(skill_index(cwd=args.cwd, refresh=args.refresh, max_skills=args.max_skills))
+        elif args.command == "skill-manual":
+            print_json(skill_manual(cwd=args.cwd, write=args.write, refresh=args.refresh, max_skills=args.max_skills))
+        elif args.command == "skill-route":
+            roles = split_csv(args.roles) if args.roles else None
+            print_json(skill_route(task=args.task, role=args.role, roles=roles, cwd=args.cwd, max_skills=args.max_skills, refresh=args.refresh))
+        elif args.command == "skill-capsule":
+            print_json(skill_capsule(task=args.task, role=args.role, cwd=args.cwd, max_skills=args.max_skills, refresh=args.refresh))
+        elif args.command == "skill-status":
+            print_json(skill_status(cwd=args.cwd))
         elif args.command == "list-profiles":
             print_json(list_profiles(include_secrets=args.include_secrets))
         elif args.command == "pick":
@@ -7549,6 +8755,8 @@ def main() -> int:
                     allow_write=args.allow_write,
                     timeout_seconds=args.timeout_seconds,
                     cwd=Path(args.cwd) if args.cwd else None,
+                    context=args.context,
+                    skills=args.skills,
                 )
             )
         elif args.command == "run-streaming":
@@ -7570,6 +8778,7 @@ def main() -> int:
                     kill_on_excessive_output=args.kill_on_excessive_output,
                     final_only=args.final_only,
                     final_max_chars=args.final_max_chars,
+                    skills=args.skills,
                 )
             )
         elif args.command == "poll-run":
@@ -7636,6 +8845,7 @@ def main() -> int:
                     cwd=Path(args.cwd) if args.cwd else None,
                     context=args.context,
                     timeout_seconds=args.timeout_seconds,
+                    skills=args.skills,
                 )
             )
         elif args.command == "collect-team-results":
@@ -7793,7 +9003,7 @@ def main() -> int:
         elif args.command == "workflow-dry-run":
             print_json(workflow_dry_run(args.file, task=args.task, cwd=Path(args.cwd) if args.cwd else None))
         elif args.command == "workflow-run":
-            print_json(workflow_run(args.file, task=args.task, cwd=Path(args.cwd) if args.cwd else None, mock=args.mock, loop_guard=args.loop_guard))
+            print_json(workflow_run(args.file, task=args.task, cwd=Path(args.cwd) if args.cwd else None, mock=args.mock, loop_guard=args.loop_guard, skills=args.skills))
         elif args.command == "workflow-status":
             print_json(workflow_status(args.workflow_id, cwd=Path(args.cwd) if args.cwd else None))
         elif args.command == "workflow-retry-node":
