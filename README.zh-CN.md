@@ -24,7 +24,7 @@
   <a href="README.md"><img alt="Language: English" src="https://img.shields.io/badge/README-English-black"></a>
   <a href="README.md"><img alt="Default README: English" src="https://img.shields.io/badge/Default-English-blue"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-brightgreen"></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-v0.7.1-black">
+  <img alt="Version" src="https://img.shields.io/badge/version-v0.8.0-black">
   <img alt="Codex Skill" src="https://img.shields.io/badge/Codex-Skill-0A0A0A">
   <img alt="MCP Included" src="https://img.shields.io/badge/MCP-Included-blue">
   <img alt="CCSwitch" src="https://img.shields.io/badge/CCSwitch-Model_Router-purple">
@@ -80,11 +80,12 @@ Skill = Codex 的操作说明书
 <h2 align="center">更新日志</h2>
 
 <p align="center">
-  <b>当前版本：v0.7.1</b>
+  <b>当前版本：v0.8.0</b>
 </p>
 
 | 版本 | 更新内容 | 为什么重要 |
 | --- | --- | --- |
+| `v0.8.0` | 实现 #26：新增本机 Skill 发现、`skill-index`、`skill-manual`、稳定 `skill-route`、轻量 `skill-capsule`，并给 `run`、`run-streaming`、`spawn-role-team`、mock `workflow-run` 增加 `--skills auto`。同时补齐 MCP 工具和 metadata 证据：选中了哪些 Skill、hash、原因、模式、上下文字节数、capsule 引用。扫描器现在使用 root alias，进目录前跳过大目录/link 目录，并避免公开输出本机绝对路径。 | Codex 现在可以给每个 Claude Code worker 只发最小够用的 Skill Capsule，不用把所有本机 Skill 都塞进去，也不会让 worker 误以为自己能直接调用 Codex-only 工具。本机路径也不会被带进公开输出。 |
 | `v0.7.1` | 修复 #24：手动执行 `workflow-retry-node` 后，workflow 顶层状态会从 `succeeded` 改成 `needs_rerun`，记录被 invalidated 的节点，并把旧 handoff/gate/token 证据标成 stale。 | Codex 和 dashboard 不会再把“已经被手动打回重跑”的 workflow 当成成功验收。pending 节点必须重新跑完，才能再次视为完成。 |
 | `v0.7.0` | 新增 GitHub issues #20、#21、#22 的第一版工作流 DAG 控制层：YAML/JSON 工作流校验、dry-run 拓扑批次、mock 工作流运行、结构化 handoff 模板与校验、节点 gate、重试决策、loop guard、workflow status/report 和 MCP 工具。 | Codex 现在可以把长任务拆成一组可验证的小节点，而不是塞进一段越来越含糊的长对话。第一版先用 mock 安全闭环，不花模型额度，也能拿数据证明控制器逻辑靠谱。 |
 | `v0.6.4` | 修复 GitHub issues #16、#17、#18：`final-only` 先过滤 raw stream 噪声再计算持久 stdout 预算；`--cwd` run 使用目标 cwd 自己的 artifact root，并用 run index 保证后续 poll；真实 token 聚合从 raw `modelUsage` 先计算，再做脱敏。 | Codex 现在有可验证的数据证据：短任务不会被 thinking/system 噪声提前打死，多个项目的 agent 产物不会串目录，usage/dashboard 也不会再显示假的 0 token。 |
@@ -101,6 +102,25 @@ Skill = Codex 的操作说明书
 | `v0.1.0` | 完成 Skill + MCP + CLI 基座：CCSwitch 发现、模型评分、角色路由、`CLAUDE.md` 生成、可视 Claude Code 窗口、日志和安全默认值。 | 证明核心思路：Codex 当大脑，Claude Code 当执行层，CCSwitch 当本地模型路由器。 |
 
 <h3 align="center">详细版本说明</h3>
+
+<details open>
+<summary><b>v0.8.0 - Skill 手册与 Skill Capsule 路由</b></summary>
+
+- 实现 #26：新增一层显式、本地优先的 Skill 发现机制。
+- 新增 `skill-index --refresh`，只扫描本机 `SKILL.md` 的安全摘要，不调用模型，不执行脚本。
+- 新增 `skill-manual --write`，生成 `.agent-workspace/claude-code-orchestrator/skills/skill-manual.md`。
+- 新增 `skill-route`，按 task + role 返回稳定排序的 Skill 短名单。
+- 新增 `skill-capsule`，把 worker 真正需要的内容写成小胶囊，放到 `skills/capsules/`。
+- `run`、`run-streaming`、`spawn-role-team`、mock `workflow-run` 支持 `--skills auto`。
+- 新增 MCP：`cc_skill_index`、`cc_skill_manual`、`cc_skill_route`、`cc_skill_capsule`、`cc_skill_status`。
+- run/team/workflow metadata 会记录 selected skills、hash、选择原因、模式、上下文字节数、capsule 引用。
+- 使用 `codex-skills`、`agents-skills`、`codex-plugin-cache` 这类稳定 root alias，避免不同 Skill 根目录里相同相对路径撞 ID。
+- 扫描前就会剪掉 `.git`、`node_modules`、虚拟环境、构建产物、symlink 和 junction 目录。
+- `skill-index`、`skill-status`、`skill-route` 和 worker capsule 的公开输出不带本机绝对 Skill 路径。
+- 明确能力边界：Browser、GitHub connector、Codex Apps 这类 Codex-only 能力会标成 `codex_mediated`，不会假装 Claude worker 能直接调用。
+- selftest 新增 Skill 索引、密钥不泄露、二次刷新复用、路由、胶囊大小、公开输出路径安全、ID 防碰撞、剪枝扫描、link scripts 安全、workflow metadata、Codex-only 不变 worker-callable 等检查。
+
+</details>
 
 <details open>
 <summary><b>v0.7.1 - 手动 retry 会取消 workflow 成功状态</b></summary>
@@ -469,6 +489,32 @@ python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" workflow-plan "Refactor th
 - 能看到 runs、reports、dashboard 会写到哪里
 - 能生成多 Agent 路由计划
 
+<h2 align="center">Skill Capsule 路由</h2>
+
+先生成本机 Skill 地图，不花模型额度：
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" skill-index --refresh --cwd .
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" skill-manual --write --cwd .
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" skill-status --cwd .
+```
+
+让 Codex 判断某个 worker 该用哪些本机 Skill：
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" skill-route --task "Audit install safety" --role security --cwd .
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" skill-capsule --task "Audit install safety" --role security --cwd .
+```
+
+只有显式加 `--skills auto` 时才会注入胶囊：
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" run-streaming "Audit install safety" --role security --cwd . --skills auto
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" spawn-role-team "Audit install safety" --roles requirements,security,testing --cwd . --skills auto
+```
+
+不加 `--skills auto` 时，旧行为不变。
+
 <h2 align="center">常用命令</h2>
 
 健康检查：
@@ -568,6 +614,8 @@ python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" dashboard
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" export-report --run-id <run_id>
 ```
 
+`init-workspace` 默认会生成 Skill index 和 manual。只想创建目录时，加 `--no-skill-scan`。
+
 打开可视 Claude Code 窗口：
 
 ```bash
@@ -600,6 +648,11 @@ Codex 可以调用这些工具：
 | `cc_run_status` | 列出正在运行的 workers，或查看某个 run |
 | `cc_send_instruction` | 通过“停止并带上下文重启”追加指令 |
 | `cc_spawn_role_team` | 一次启动多个角色 worker |
+| `cc_skill_index` | 生成只含安全摘要的本机 Skill 索引 |
+| `cc_skill_manual` | 写入人能看的本机 Skill 手册 |
+| `cc_skill_route` | 给某个 task + role 选择最小够用 Skill 短名单 |
+| `cc_skill_capsule` | 写入面向 worker 的轻量 Skill Capsule |
+| `cc_skill_status` | 不重新扫描，只查看 Skill 索引、手册、胶囊状态 |
 | `cc_collect_team_results` | 汇总团队输出，标出一致结论和冲突风险 |
 | `cc_cross_review` | 启动二轮交叉审查 worker |
 | `cc_preflight_write_scope` | 写代码前固定允许目录、禁止文件和最大 diff |

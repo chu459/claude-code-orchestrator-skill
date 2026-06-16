@@ -34,6 +34,8 @@ python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" workspace-status --cwd /path/t
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" folder-policy --cwd /path/to/project --apply
 ```
 
+`init-workspace` generates the Skill index and manual by default. Add `--no-skill-scan` for folder-only initialization.
+
 Maintain old or noisy artifacts:
 
 ```bash
@@ -75,6 +77,20 @@ python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" workflow-run --file examples/w
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" workflow-status --workflow-id WF_ID
 python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" workflow-report --workflow-id WF_ID
 ```
+
+Use local Skill Capsule routing when a worker should receive focused local Skill guidance:
+
+```bash
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" skill-index --refresh --cwd /path/to/project
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" skill-manual --write --cwd /path/to/project
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" skill-route --task "Audit install safety" --role security --cwd /path/to/project
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" skill-capsule --task "Audit install safety" --role security --cwd /path/to/project
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" run-streaming "Audit install safety" --role security --cwd /path/to/project --skills auto
+python "$CC_ORCHESTRATOR_HOME/cc_orchestrator.py" spawn-role-team "Audit install safety" --roles requirements,security,testing --cwd /path/to/project --skills auto
+```
+
+`--skills auto` is opt-in. Without it, worker prompts keep the old behavior.
+Skill routing outputs use root aliases and relative refs, so CLI JSON does not expose absolute local Skill paths.
 
 Use structured handoff contracts:
 

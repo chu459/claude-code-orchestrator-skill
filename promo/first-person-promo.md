@@ -279,7 +279,38 @@ Claude Code 本身支持项目级人设文档。
 - 模型按角色评分。
 - 多 Agent 路由计划。
 - Claude Code 子 Agent 启动。
+- Claude Code streaming 实时运行。
+- `poll-run` 实时查看 worker 状态。
+- `stop-run` 终止跑偏 worker。
+- `run-status` 查看正在运行的 workers。
+- 角色团队启动。
+- 多 Agent 结果汇总。
+- 交叉审查。
 - 可见 Claude Code 窗口。
+- 写入范围预检。
+- diff 风险摘要。
+- 密钥扫描。
+- 一键验收 `verify-run`。
+- 回滚建议。
+- 任务队列。
+- 成本护栏。
+- 模型 benchmark。
+- 模型能力库。
+- 本机偏好覆盖。
+- worker 质量评分。
+- Prompt Pack 任务模板。
+- 本地 dashboard。
+- 运行报告导出。
+- 工作流 DAG 校验和 dry-run。
+- mock 工作流运行。
+- workflow status / report / retry / stop。
+- 结构化 handoff 合约。
+- 节点 gate。
+- 自动重试。
+- 超过重试次数阻断。
+- loop guard。
+- 手动 retry 后自动把 workflow 标成 `needs_rerun`。
+- 旧证据会变成 `stale_evidence`，不会继续伪装成成功验收。
 - Windows 中文 / UTF-8 处理。
 - run 日志保存。
 - `last-run` 查看最近运行。
@@ -289,7 +320,62 @@ Claude Code 本身支持项目级人设文档。
 
 它不是完美终局。
 
-但它已经是一个能跑、能测、能复用的工程底座。
+但它已经不是一个“想法 demo”。
+
+它已经是一个能跑、能测、能验收、能复盘、能持续修 bug 的工程底座。
+
+## 最近我实际补上了什么？
+
+这几轮更新，我不是只在 README 里加形容词。
+
+我是真把 GitHub issues 里的问题拿出来，一个个修。
+
+比如：
+
+- 修了 portable 工具目录找不到版本和 Prompt Pack 的问题。
+- 修了初始化后清理命令误提示删除骨架目录的问题。
+- 加了 `.agent-workspace`，把 worker 日志、报告、看板、临时文件统一收起来。
+- 加了实时 streaming 控制，让 Codex 可以边看边管 worker。
+- 加了输出预算，防止 worker 输出跑飞。
+- 加了 final-only，减少 raw stream 噪声。
+- 加了 cwd-scoped artifact root，避免不同项目的 run 混到一起。
+- 加了实际 `modelUsage` 统计，能看到真实 token 和真实模型。
+- 加了 route mismatch 风险提示，避免“声明用 A，实际用 B”。
+- 加了 workflow DAG，让复杂任务可以拆成可验证节点。
+- 加了 handoff 合约，不再只靠自由文本汇报。
+- 加了 gate、retry、loop guard，让工作流有控制逻辑。
+- 修了手动 retry 后 workflow 还显示 `succeeded` 的危险 bug。
+
+最后这个 bug 很典型。
+
+workflow 已经被手动打回重跑了。
+
+如果顶层状态还写着 `succeeded`，Codex 或 dashboard 就可能误判：
+
+> 这个任务已经验收成功。
+
+但实际上，里面有一批节点已经变成 `pending`。
+
+所以现在它会明确变成：
+
+```text
+status = needs_rerun
+requires_rerun = true
+```
+
+旧的 handoff、gate、token、cost 也不会再当成当前证据。
+
+只会被标记成：
+
+```text
+stale_evidence
+```
+
+这才是我想要的工程状态。
+
+不是“看起来成功”。
+
+而是“证据真的对得上状态”。
 
 ## 我为什么觉得它很有潜力？
 
@@ -392,21 +478,25 @@ workflow-plan
 
 我想继续把它做成更完整的多 Agent 控制台。
 
-后面可以加：
+很多早期想做的东西，现在已经做了一大半。
 
-- 实时进度流。
-- 终端仪表盘。
-- Web 看板。
-- 多 Agent 并行调度。
-- 自动交叉审查。
-- 预算策略。
-- worker 状态追踪。
-- Agent 结果投票。
-- 更细的模型评分。
+接下来我更想继续打磨这些方向：
 
-我最想做的是实时进度。
+- 更丝滑的 Web UI。
+- 更清楚的 run timeline。
+- 更强的 workflow 恢复和继续执行。
+- 更细的模型真实能力评分。
+- 更可靠的跨项目模板。
+- 更自动化的 release check。
+- 更完整的失败模式识别。
+- 更强的 dashboard 控制能力。
+- 更适合普通用户的一句话安装和迁移体验。
 
-也就是 Codex 可以看到：
+我最想继续做的，还是“可观察”。
+
+也就是 Codex 不只是能派活。
+
+它还要能持续看到：
 
 - 哪个 Agent 正在跑。
 - 用的是哪个模型。
@@ -423,6 +513,37 @@ workflow-plan
 不是盲跑。
 
 而是可观察、可复盘、可调度。
+
+## 我会持续追踪 issues
+
+这套 Skill 我不会做成一次性项目。
+
+我会持续让我的 Codex 追踪 GitHub issues。
+
+如果有人提了好的功能点，我会评估。
+
+如果有人提了真实 bug，最好带复现步骤和数据。
+
+像这次 #24 一样：
+
+- 现象是什么。
+- 怎么复现。
+- 期望是什么。
+- 实际输出是什么。
+- 哪些检查已经通过。
+- 风险在哪里。
+
+这种 issue 非常有价值。
+
+因为它不是一句“好像有问题”。
+
+而是能直接推动工程变强的输入。
+
+所以如果你觉得这套 Skill 有哪里不够好，或者你想要某个新能力，欢迎直接提 issue。
+
+我会继续更新。
+
+这套 Skill 会随着真实使用、真实 bug、真实需求不断长出来。
 
 ## 最后说人话
 
@@ -453,7 +574,16 @@ workflow-plan
 
 https://github.com/chu459/claude-code-orchestrator-skill
 
+欢迎提 issue。
+
+欢迎提功能建议。
+
+欢迎提 bug 复现。
+
+我的 Codex 会持续追踪这些反馈。
+
+只要是能让这套多 Agent 工程更稳、更强、更省额度的点，我都会认真看。
+
 如果你也遇到过“子智能体很好用，但额度烧太快”的问题，可以试试它。
 
 让 Plus 的额度，用出 Pro 的效果。
-

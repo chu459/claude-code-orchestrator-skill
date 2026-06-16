@@ -18,6 +18,11 @@ The server discovers CCSwitch from environment variables and the current user ho
 - `cc_run_status` lists active streaming workers or inspects one run.
 - `cc_send_instruction` stops and restarts a run with recovered context and a new instruction.
 - `cc_spawn_role_team` starts multiple role workers and writes a team manifest.
+- `cc_skill_index` builds a metadata-only local Skill index.
+- `cc_skill_manual` writes the human-readable local Skill manual.
+- `cc_skill_route` picks a small Skill shortlist for a task and role.
+- `cc_skill_capsule` writes a compact role-specific Skill Capsule.
+- `cc_skill_status` reports Skill index/manual/capsule status without rescanning.
 - `cc_collect_team_results` summarizes team output, repeated agreements, and conflicts/risks.
 - `cc_cross_review` launches second-round reviewer workers over previous outputs.
 - `cc_preflight_write_scope` writes allowed/denied path rules before write-enabled work.
@@ -26,6 +31,7 @@ The server discovers CCSwitch from environment variables and the current user ho
 - `cc_secret_scan_run` scans run output/events/diff for leaked credentials.
 - `cc_rollback_run` conservatively rolls back only when a clean git snapshot proves it is safe.
 - `cc_verify_run` runs diff summary, write-scope check, secret scan, optional tests, and a report.
+- Skill routing outputs use root aliases and relative refs, so MCP/CLI JSON does not expose absolute local Skill paths.
 - `cc_benchmark_model` plans or runs a small real benchmark task.
 - `cc_benchmark_suite` plans or runs fixed code/review/security/context/multimodal benchmarks.
 - `cc_model_registry` builds the local model capability database.
@@ -39,6 +45,7 @@ The server discovers CCSwitch from environment variables and the current user ho
 - `cc_upgrade_check` records version state while preserving local calibration, overrides, model registry, quality history, queue policy, and cost settings.
 - `cc_mock_stream_test` validates streaming/poll/stop/status with a fake Claude stream.
 - `cc_init_workspace` initializes `.agent-workspace`, templates, policy files, rollback/log dirs, and optional `CLAUDE.md`.
+- `cc_init_workspace` also generates the local Skill index and manual by default; set `scan_skills=false` for folder-only setup.
 - `cc_workspace_status` shows where Codex and Claude Code artifacts will be written.
 - `cc_migrate_data` previews or moves legacy `runs`, `reports`, and `dashboard` into the managed workspace.
 - `cc_clean_workspace` cleans tmp files, non-scaffold empty dirs, and expired run folders; dry-run by default.
@@ -110,6 +117,10 @@ python tools\cc-orchestrator\cc_orchestrator.py workflow-dry-run --file examples
 python tools\cc-orchestrator\cc_orchestrator.py workflow-run --file examples\workflows\safe-refactor.yaml --task "Fix the bug" --mock
 python tools\cc-orchestrator\cc_orchestrator.py workflow-status --workflow-id WF_ID
 python tools\cc-orchestrator\cc_orchestrator.py workflow-report --workflow-id WF_ID
+python tools\cc-orchestrator\cc_orchestrator.py skill-index --refresh --cwd .
+python tools\cc-orchestrator\cc_orchestrator.py skill-manual --write --cwd .
+python tools\cc-orchestrator\cc_orchestrator.py skill-route --task "Audit install safety" --role security --cwd .
+python tools\cc-orchestrator\cc_orchestrator.py skill-capsule --task "Audit install safety" --role security --cwd .
 python tools\cc-orchestrator\cc_orchestrator.py handoff-template --role testing
 python tools\cc-orchestrator\cc_orchestrator.py handoff-validate --run-id RUN_ID
 python tools\cc-orchestrator\cc_orchestrator.py run-streaming "Review this project" --role review

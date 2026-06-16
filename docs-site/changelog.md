@@ -2,6 +2,19 @@
 
 This page tracks the public docs-facing history of Claude Code Orchestrator Skill.
 
+## v0.8.0 - Skill manual and Skill Capsule routing
+
+- Implements GitHub issue #26.
+- Added `skill-index --refresh`, `skill-manual --write`, `skill-route`, `skill-capsule`, and `skill-status`.
+- Added `--skills auto` for `run`, `run-streaming`, `spawn-role-team`, and mock `workflow-run`.
+- Added MCP tools: `cc_skill_index`, `cc_skill_manual`, `cc_skill_route`, `cc_skill_capsule`, and `cc_skill_status`.
+- Run/team/workflow metadata now records selected skills, hashes, selection reasons, modes, context bytes, and capsule refs.
+- Skill IDs now use stable root aliases such as `codex-skills`, `agents-skills`, and `codex-plugin-cache` to avoid collisions across same-named roots.
+- The scanner prunes `.git`, `node_modules`, virtualenv, build output, symlink, and junction directories before entering them.
+- Public Skill CLI/MCP outputs avoid absolute local Skill paths in index, status, route, and capsule results.
+- Codex-only capabilities are marked `codex_mediated` so workers do not receive fake direct access to Browser, GitHub connector, Codex apps, or other controller-only tools.
+- Selftest now covers Skill routing, compact capsules, stable refresh, no body/frontmatter secret leakage, path-safe public outputs, ID collision protection, pruned scanning, linked-script safety, workflow metadata, and Codex-only mode checks.
+
 ## v0.7.1 - Manual retry invalidates workflow success
 
 - Fixed GitHub issue #24.

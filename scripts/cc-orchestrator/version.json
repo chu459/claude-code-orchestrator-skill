@@ -1,6 +1,6 @@
 {
   "name": "claude-code-orchestrator-skill",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "schema_version": 2,
   "released_at": "2026-06-16",
   "notes": [
@@ -10,7 +10,8 @@
     "Fixes the GitHub Actions docs deploy secret-scan false positive by splitting placeholder test tokens while keeping placeholder-secret regression coverage.",
     "Fixes GitHub issues #16, #17, and #18 with data-tested final-only output filtering, cwd-scoped artifact roots plus run indexing, raw modelUsage token aggregation before redaction, and faster Windows PID checks.",
     "Adds the first workflow DAG controller layer for GitHub issues #20, #21, and #22: YAML/JSON validation, dry-run batches, mock workflow runs, structured handoff contracts, node gates, retry decisions, loop guard, workflow reports, and matching MCP tools.",
-    "Fixes GitHub issue #24 so manual workflow retry changes the top-level status to needs_rerun and marks invalidated node evidence as stale instead of surfacing old success evidence."
+    "Fixes GitHub issue #24 so manual workflow retry changes the top-level status to needs_rerun and marks invalidated node evidence as stale instead of surfacing old success evidence.",
+    "Implements GitHub issue #26 with local Skill index/manual generation, stable Skill routing, compact Skill Capsules, --skills auto for run/run-streaming/spawn-role-team/mock workflow, matching MCP tools, and metadata evidence for selected skills, hashes, reasons, modes, context bytes, and capsule paths."
   ],
   "local_user_owned_files": [
     "scripts/cc-orchestrator/config/model_calibration.json",

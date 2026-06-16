@@ -76,6 +76,8 @@ python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" workspace-status --cwd "PR
 python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" folder-policy --cwd "PROJECT_PATH" --apply
 ```
 
+`init-workspace` creates the local Skill index and manual by default. Use `--no-skill-scan` for folder-only initialization.
+
 Move and maintain old agent artifacts safely:
 
 ```powershell
@@ -119,6 +121,25 @@ python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" write-claude-md --cwd "PRO
 ```
 
 If a project already has `CLAUDE.md`, preserve it by default. Use `--append` to add the managed orchestrator section, or `--force` to replace after writing a timestamped backup.
+
+Build and use the local Skill map:
+
+```powershell
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" skill-index --refresh --cwd "PROJECT_PATH"
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" skill-manual --write --cwd "PROJECT_PATH"
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" skill-route --task "TASK" --role security --cwd "PROJECT_PATH"
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" skill-capsule --task "TASK" --role security --cwd "PROJECT_PATH"
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" skill-status --cwd "PROJECT_PATH"
+```
+
+Skill routing JSON uses root aliases and relative refs. Do not rely on absolute local Skill paths in controller-facing or worker-facing outputs.
+
+Use `--skills auto` only when Codex wants Claude Code workers to receive a compact Skill Capsule:
+
+```powershell
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" run-streaming "TASK" --role security --cwd "PROJECT_PATH" --skills auto
+python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" spawn-role-team "TASK" --roles requirements,security,testing --cwd "PROJECT_PATH" --skills auto
+```
 
 Pick a route without running Claude Code:
 
@@ -250,6 +271,8 @@ python "$env:CC_ORCHESTRATOR_HOME\cc_orchestrator.py" diff --cwd "PROJECT_PATH"
 - Use `controller-report` / `pressure-report` after multi-agent or pressure runs to export acceptance evidence.
 - Use `decision-review` before high-impact accept, merge, or release decisions when evidence is thin or risk is nontrivial.
 - When Claude Code needs a stable persona, project rules, or role-specific worker behavior, write `CLAUDE.md` first with `write-claude-md` or MCP tool `cc_write_claude_md`, then run the sub-agent from that project cwd.
+- When Claude Code needs local Codex Skill guidance, first run `skill-index --refresh` and `skill-route`; inject with `--skills auto` only when the selected capsule is useful. Do not dump full `SKILL.md` files into worker prompts.
+- Treat `codex_mediated` Skills as requests back to Codex, not as worker-callable tools.
 - Before heavy multi-agent work in a project, run `init-workspace` or MCP `cc_init_workspace`. Keep agent logs, reports, dashboards, archives, rollback notes, templates, policies, and temp files under `.agent-workspace/claude-code-orchestrator`.
 - Use `folder-policy` or MCP `cc_folder_policy` to make the boundary explicit: manage agent-generated artifacts only; do not clean, archive, or migrate project source files.
 
@@ -301,6 +324,11 @@ Use the same role names through MCP:
 - `cc_local_policy` reads or writes user-owned local routing overrides that upgrades must preserve.
 - `cc_score_worker` grades one worker run and records model quality history.
 - `cc_prompt_pack` lists or renders reusable worker prompt templates.
+- `cc_skill_index` builds a metadata-only local Skill index.
+- `cc_skill_manual` writes the human-readable Skill manual.
+- `cc_skill_route` returns a stable Skill shortlist for a task and role.
+- `cc_skill_capsule` writes a compact worker-facing Skill Capsule.
+- `cc_skill_status` reports Skill index/manual/capsule state without rescanning.
 - `cc_cost_guard` stores max concurrency and timeout guardrails.
 - `cc_usage_summary` estimates daily tokens, duration, failures, and per-model usage from logs.
 - `cc_queue_submit`, `cc_queue_tick`, `cc_queue_status`, and `cc_queue_cancel` provide priority queue scheduling with `queued`, `running`, `done`, `failed`, `timed_out`, and `cancelled` states.
